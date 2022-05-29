@@ -2,6 +2,8 @@
 
 Authenticode-JS is a fully NodeJS tool that can sign Windows executables. You can also get information about an executable signature, un-sign an executable and generate your own code signing certificate.
 
+This module can be useful when wanting to sign windows executable on non-windows platforms, like signing a Windows executable on Linux or macOS. This code is used by (MeshCentral)[https://meshcentral.com] to code-sign the agent on each installed server.
+
 ## Using as a command line tool
 
 You can run authenticode.js as a command line tool like this:
@@ -44,7 +46,7 @@ followed by all certificates that form the trust chain.
 
 ## Using as a module
 
-You can use authenticode-js in your code as an external module. To load an exectuable:
+You can use authenticode-js in your code as an external module. To load an exectuable call `createAuthenticodeHandler`. This call will return null if the executable can't be loaded or is invalid.
 
 ```
 var exehandler = require("authenticode").createAuthenticodeHandler("/tmp/windowsexecutable.exe");
