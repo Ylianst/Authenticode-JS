@@ -1,0 +1,30 @@
+{
+  "name": "authenticode-js",
+  "version": "1.0.0",
+  "keywords": [
+    "authenticode",
+    "code signing"
+  ],
+  "homepage": "https://meshcentral.com",
+  "description": "Pure NodeJS code signing tool for Windows executables",
+  "author": "Ylian Saint-Hilaire <ylianst@gmail.com>",
+  "main": "authenticode.js",
+  "license": "Apache-2.0",
+  "files": [
+    "*.js",
+    "readme.txt",
+    "license.txt"
+  ],
+  "dependencies": {
+    "minimist": "^1.2.5",
+    "node-forge": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=10.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ylianst/MeshCentral.git"
+  },
+  "readme": "readme.md"
+}
