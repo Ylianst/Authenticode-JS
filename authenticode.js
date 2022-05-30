@@ -357,6 +357,7 @@ function start() {
         console.log("  node authenticode.js [command] [options]");
         console.log("Commands:");
         console.log("  info: Show information about an executable.");
+        console.log("          --exe [file]             Required executable to view information.");
         console.log("          --json                   Show information in JSON format.");
         console.log("  sign: Sign an executable.");
         console.log("          --exe [file]             Required executable to sign.");
