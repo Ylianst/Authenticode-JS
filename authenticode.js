@@ -125,46 +125,138 @@ function createAuthenticodeHandler(path) {
         obj.filesize = obj.stats.size;
         if (obj.filesize < 64) { obj.close(); return false; } // File too short.
 
-        // Read the PE header pointer
+        // Read the DOS header (64 bytes)
         var buf = readFileSlice(60, 4);
-        obj.header.PeHeaderLocation = buf.readUInt32LE(0); // The DOS header is 64 bytes long, the last 4 bytes are a pointer to the PE header.
-        obj.header.PeOptionalHeaderLocation = obj.header.PeHeaderLocation + 24; // The PE optional header is located just after the PE header which is 24 bytes long.
+        obj.header.peHeaderLocation = buf.readUInt32LE(0); // The DOS header is 64 bytes long, the last 4 bytes are a pointer to the PE header.
+        obj.header.peOptionalHeaderLocation = obj.header.peHeaderLocation + 24; // The PE optional header is located just after the PE header which is 24 bytes long.
 
-        // Check file size and PE header
-        if (obj.filesize < (160 + obj.header.PeHeaderLocation)) { obj.close(); return false; } // Invalid SizeOfHeaders.
-        if (readFileSlice(obj.header.PeHeaderLocation, 4).toString('hex') != '50450000') { obj.close(); return false; } // Invalid PE header, must start with "PE" (HEX: 50 45 00 00).
+        // Check file size and signature
+        if (obj.filesize < (160 + obj.header.peHeaderLocation)) { obj.close(); return false; } // Invalid SizeOfHeaders.
+        if (readFileSlice(obj.header.peHeaderLocation, 4).toString('hex') != '50450000') { obj.close(); return false; } // Invalid PE header, must start with "PE" (HEX: 50 45 00 00).
 
-        // Read the size of the optional header
-        obj.header.PeOptionalHeaderSize = readFileSlice(obj.header.PeHeaderLocation + 20, 2).readUInt16LE(0);
+        // Read the COFF header
+        // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#coff-file-header-object-and-image
+        var coffHeader = readFileSlice(obj.header.peHeaderLocation + 4, 20)
+        obj.header.coff = {};
+        obj.header.coff.machine = coffHeader.readUInt16LE(0);
+        obj.header.coff.numberOfSections = coffHeader.readUInt16LE(2);
+        obj.header.coff.timeDateStamp = coffHeader.readUInt32LE(4);
+        obj.header.coff.pointerToSymbolTable = coffHeader.readUInt32LE(8);
+        obj.header.coff.numberOfSymbols = coffHeader.readUInt32LE(12);
+        obj.header.coff.sizeOfOptionalHeader = coffHeader.readUInt16LE(16);
+        obj.header.coff.characteristics = coffHeader.readUInt16LE(18);
 
-        // The section headers are located after the optional PE header
-        obj.header.SectionHeadersPtr = obj.header.PeOptionalHeaderLocation + obj.header.PeOptionalHeaderSize;
+        // Read the entire PE optional header
+        var optinalHeader = readFileSlice(obj.header.peOptionalHeaderLocation, obj.header.coff.sizeOfOptionalHeader);
 
-        // Check header magic data
-        var magic = readFileSlice(obj.header.PeOptionalHeaderLocation, 2).readUInt16LE(0);
-        switch (magic) {
+        // Decode the PE optional header standard fields
+        // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#optional-header-standard-fields-image-only
+        obj.header.peStandard = {};
+        obj.header.peStandard.magic = optinalHeader.readUInt16LE(0);
+        switch (obj.header.peStandard.magic) { // Check magic value
             case 0x020B: obj.header.pe32plus = 1; break;
             case 0x010B: obj.header.pe32plus = 0; break;
             default: { obj.close(); return false; } // Invalid Magic in PE
         }
+        obj.header.peStandard.majorLinkerVersion = optinalHeader[2];
+        obj.header.peStandard.minorLinkerVersion = optinalHeader[3];
+        obj.header.peStandard.sizeOfCode = optinalHeader.readUInt32LE(4);
+        obj.header.peStandard.sizeOfInitializedData = optinalHeader.readUInt32LE(8);
+        obj.header.peStandard.sizeOfUninitializedData = optinalHeader.readUInt32LE(12);
+        obj.header.peStandard.addressOfEntryPoint = optinalHeader.readUInt32LE(16);
+        obj.header.peStandard.baseOfCode = optinalHeader.readUInt32LE(20);
+        if (obj.header.pe32plus == 0) { obj.header.peStandard.baseOfData = optinalHeader.readUInt32LE(24); }
 
-        // Read optional PE header information
-        obj.header.pe_checksum = readFileSlice(obj.header.PeOptionalHeaderLocation + 64, 4).readUInt32LE(0);
-        obj.header.numRVA = readFileSlice(obj.header.PeOptionalHeaderLocation + 92 + (obj.header.pe32plus * 16), 4).readUInt32LE(0);
-        buf = readFileSlice(obj.header.PeOptionalHeaderLocation + 128 + (obj.header.pe32plus * 16), 8);
-        obj.header.sigpos = buf.readUInt32LE(0);
-        obj.header.siglen = buf.readUInt32LE(4);
+        // Decode the PE optional header windows fields
+        // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#optional-header-windows-specific-fields-image-only
+        obj.header.peWindows = {}
+        if (obj.header.pe32plus == 0) {
+            // 32bit header
+            obj.header.peWindows.imageBase = optinalHeader.readUInt32LE(28);
+            obj.header.peWindows.sectionAlignment = optinalHeader.readUInt32LE(32);
+            obj.header.peWindows.fileAlignment = optinalHeader.readUInt32LE(36);
+            obj.header.peWindows.majorOperatingSystemVersion = optinalHeader.readUInt16LE(40);
+            obj.header.peWindows.minorOperatingSystemVersion = optinalHeader.readUInt16LE(42);
+            obj.header.peWindows.majorImageVersion = optinalHeader.readUInt16LE(44);
+            obj.header.peWindows.minorImageVersion = optinalHeader.readUInt16LE(46);
+            obj.header.peWindows.majorSubsystemVersion = optinalHeader.readUInt16LE(48);
+            obj.header.peWindows.minorSubsystemVersion = optinalHeader.readUInt16LE(50);
+            obj.header.peWindows.win32VersionValue = optinalHeader.readUInt32LE(52);
+            obj.header.peWindows.sizeOfImage = optinalHeader.readUInt32LE(56);
+            obj.header.peWindows.sizeOfHeaders = optinalHeader.readUInt32LE(60);
+            obj.header.peWindows.checkSum = optinalHeader.readUInt32LE(64);
+            obj.header.peWindows.subsystem = optinalHeader.readUInt16LE(68);
+            obj.header.peWindows.dllCharacteristics = optinalHeader.readUInt16LE(70);
+            obj.header.peWindows.sizeOfStackReserve = optinalHeader.readUInt32LE(72);
+            obj.header.peWindows.sizeOfStackCommit = optinalHeader.readUInt32LE(76);
+            obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readUInt32LE(80);
+            obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readUInt32LE(84);
+            obj.header.peWindows.loaderFlags = optinalHeader.readUInt32LE(88);
+            obj.header.peWindows.numberOfRvaAndSizes = optinalHeader.readUInt32LE(92);
+        } else {
+            // 64bit header
+            obj.header.peWindows.imageBase = optinalHeader.readBigUInt64LE(24);
+            obj.header.peWindows.sectionAlignment = optinalHeader.readUInt32LE(32);
+            obj.header.peWindows.fileAlignment = optinalHeader.readUInt32LE(36);
+            obj.header.peWindows.majorOperatingSystemVersion = optinalHeader.readUInt16LE(40);
+            obj.header.peWindows.minorOperatingSystemVersion = optinalHeader.readUInt16LE(42);
+            obj.header.peWindows.majorImageVersion = optinalHeader.readUInt16LE(44);
+            obj.header.peWindows.minorImageVersion = optinalHeader.readUInt16LE(46);
+            obj.header.peWindows.majorSubsystemVersion = optinalHeader.readUInt16LE(48);
+            obj.header.peWindows.minorSubsystemVersion = optinalHeader.readUInt16LE(50);
+            obj.header.peWindows.win32VersionValue = optinalHeader.readUInt32LE(52);
+            obj.header.peWindows.sizeOfImage = optinalHeader.readUInt32LE(56);
+            obj.header.peWindows.sizeOfHeaders = optinalHeader.readUInt32LE(60);
+            obj.header.peWindows.checkSum = optinalHeader.readUInt32LE(64);
+            obj.header.peWindows.subsystem = optinalHeader.readUInt16LE(68);
+            obj.header.peWindows.dllCharacteristics = optinalHeader.readUInt16LE(70);
+            obj.header.peWindows.sizeOfStackReserve = optinalHeader.readBigUInt64LE(72);
+            obj.header.peWindows.sizeOfStackCommit = optinalHeader.readBigUInt64LE(80);
+            obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readBigUInt64LE(88);
+            obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readBigUInt64LE(96);
+            obj.header.peWindows.loaderFlags = optinalHeader.readUInt32LE(104);
+            obj.header.peWindows.numberOfRvaAndSizes = optinalHeader.readUInt32LE(108);
+        }
+
+        // Decode the PE optional header data directories
+        // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#optional-header-data-directories-image-only
+        obj.header.dataDirectories = {}
+        const pePlusOffset = (obj.header.pe32plus == 0) ? 0 : 16; // This header is the same for 32 and 64 bit, but 64bit is offset by 16 bytes.
+        obj.header.dataDirectories.exportTable = { addr: optinalHeader.readUInt32LE(96 + pePlusOffset), size: optinalHeader.readUInt32LE(100 + pePlusOffset) };
+        obj.header.dataDirectories.importTable = { addr: optinalHeader.readUInt32LE(104 + pePlusOffset), size: optinalHeader.readUInt32LE(108 + pePlusOffset) };
+        obj.header.dataDirectories.resourceTable = { addr: optinalHeader.readUInt32LE(112 + pePlusOffset), size: optinalHeader.readUInt32LE(116 + pePlusOffset) }; // Same as .rsrc virtual address & size
+        obj.header.dataDirectories.exceptionTableAddr = { addr: optinalHeader.readUInt32LE(120 + pePlusOffset), size: optinalHeader.readUInt32LE(124 + pePlusOffset) }; // Same as .pdata virtual address & size
+        obj.header.dataDirectories.certificateTable = { addr: optinalHeader.readUInt32LE(128 + pePlusOffset), size: optinalHeader.readUInt32LE(132 + pePlusOffset) };
+        obj.header.dataDirectories.baseRelocationTable = { addr: optinalHeader.readUInt32LE(136 + pePlusOffset), size: optinalHeader.readUInt32LE(140 + pePlusOffset) }; // Same as .reloc virtual address & size
+        obj.header.dataDirectories.debug = { addr: optinalHeader.readUInt32LE(144 + pePlusOffset), size: optinalHeader.readUInt32LE(148 + pePlusOffset) };
+        // obj.header.dataDirectories.architecture = optinalHeader.readBigUInt64LE(152 + pePlusOffset); // Must be zero
+        obj.header.dataDirectories.globalPtr = { addr: optinalHeader.readUInt32LE(160 + pePlusOffset), size: optinalHeader.readUInt32LE(164 + pePlusOffset) };
+        obj.header.dataDirectories.tLSTable = { addr: optinalHeader.readUInt32LE(168 + pePlusOffset), size: optinalHeader.readUInt32LE(172 + pePlusOffset) };
+        obj.header.dataDirectories.loadConfigTable = { addr: optinalHeader.readUInt32LE(176 + pePlusOffset), size: optinalHeader.readUInt32LE(180 + pePlusOffset) };
+        obj.header.dataDirectories.boundImport = { addr: optinalHeader.readUInt32LE(184 + pePlusOffset), size: optinalHeader.readUInt32LE(188 + pePlusOffset) };
+        obj.header.dataDirectories.iAT = { addr: optinalHeader.readUInt32LE(192 + pePlusOffset), size: optinalHeader.readUInt32LE(196 + pePlusOffset) };
+        obj.header.dataDirectories.delayImportDescriptor = { addr: optinalHeader.readUInt32LE(200 + pePlusOffset), size: optinalHeader.readUInt32LE(204 + pePlusOffset) };
+        obj.header.dataDirectories.clrRuntimeHeader = { addr: optinalHeader.readUInt32LE(208 + pePlusOffset), size: optinalHeader.readUInt32LE(212 + pePlusOffset) };
+        // obj.header.dataDirectories.reserved = optinalHeader.readBigUInt64LE(216 + pePlusOffset); // Must be zero
+
+        // Get the certificate table location and size
+        obj.header.sigpos = obj.header.dataDirectories.certificateTable.addr;
+        obj.header.siglen = obj.header.dataDirectories.certificateTable.size
         obj.header.signed = ((obj.header.sigpos != 0) && (obj.header.siglen != 0));
+
+        // The section headers are located after the optional PE header
+        obj.header.SectionHeadersPtr = obj.header.peOptionalHeaderLocation + obj.header.coff.sizeOfOptionalHeader;
 
         // Read the sections
         obj.header.sections = {};
-        for (var i = 0; i < 16; i++) {
+        for (var i = 0; i < obj.header.coff.numberOfSections; i++) {
             var section = {};
             buf = readFileSlice(obj.header.SectionHeadersPtr + (i * 40), 40);
-            if (buf[0] != 46) break; // Name of the section must start with a dot. If not, we are done reading sections.
+            if (buf[0] != 46) { obj.close(); return false; }; // Name of the section must start with a dot. If not, something is wrong.
             var sectionName = buf.slice(0, 8).toString().trim('\0');
             var j = sectionName.indexOf('\0');
             if (j >= 0) { sectionName = sectionName.substring(0, j); } // Trim any trailing zeroes
+            section.ptr = obj.header.SectionHeadersPtr + (i * 40);
             section.virtualSize = buf.readUInt32LE(8);
             section.virtualAddr = buf.readUInt32LE(12);
             section.rawSize = buf.readUInt32LE(16);
@@ -177,10 +269,12 @@ function createAuthenticodeHandler(path) {
             obj.header.sections[sectionName] = section;
         }
 
+        // Compute the checkSum value for this file
+        obj.header.peWindows.checkSumActual = runChecksum();
+
         // If there is a .rsrc section, read the resource information and locations
         if (obj.header.sections['.rsrc'] != null) {
-            var ptr = obj.header.sections['.rsrc'].rawAddr;
-            obj.resources = readResourceTable(ptr, 0); // Read all resources recursively
+            obj.resources = readResourceTable(obj.header.sections['.rsrc'].rawAddr, 0); // Read all resources recursively
         }
 
         if (obj.header.signed) {
@@ -279,15 +373,21 @@ function createAuthenticodeHandler(path) {
         r.majorVersion = buf.readUInt16LE(8);
         r.minorVersion = buf.readUInt16LE(10);
         var numberOfNamedEntries = buf.readUInt16LE(12);
-        var numberofIdEntries = buf.readUInt16LE(14);
+        var numberOfIdEntries = buf.readUInt16LE(14);
+
         r.entries = [];
-        var totalResources = numberOfNamedEntries + numberofIdEntries;
+        var totalResources = numberOfNamedEntries + numberOfIdEntries;
+        //console.log('readResourceTable', offset, 16 + (totalResources) * 8, offset + (16 + (totalResources) * 8));
         for (var i = 0; i < totalResources; i++) {
             buf = readFileSlice(ptr + offset + 16 + (i * 8), 8);
             var resource = {};
             resource.name = buf.readUInt32LE(0);
             var offsetToData = buf.readUInt32LE(4);
-            if ((resource.name & 0x80000000) != 0) { resource.name = readLenPrefixUnicodeString(ptr + (resource.name - 0x80000000)); }
+            if ((resource.name & 0x80000000) != 0) {
+                var oname = resource.name;
+                resource.name = readLenPrefixUnicodeString(ptr + (resource.name - 0x80000000));
+                //console.log('readResourceName', offset + (oname - 0x80000000), 2 + (resource.name.length * 2), offset + (oname - 0x80000000) + (2 + resource.name.length * 2), resource.name);
+            }
             if ((offsetToData & 0x80000000) != 0) { resource.table = readResourceTable(ptr, offsetToData - 0x80000000); } else { resource.item = readResourceItem(ptr, offsetToData); }
             r.entries.push(resource);
         }
@@ -298,9 +398,11 @@ function createAuthenticodeHandler(path) {
     // ptr: The pointer to the start of the resource section
     // offset: The offset start of the resource item to read
     function readResourceItem(ptr, offset) {
+        //console.log('readResourceItem', offset, 16, offset + 16);
         var buf = readFileSlice(ptr + offset, 16), r = {};
         r.offsetToData = buf.readUInt32LE(0);
         r.size = buf.readUInt32LE(4);
+        //console.log('readResourceData', r.offsetToData - obj.header.sections['.rsrc'].virtualAddr, r.size, r.offsetToData + r.size - obj.header.sections['.rsrc'].virtualAddr);
         r.codePage = buf.readUInt32LE(8);
         r.reserved = buf.readUInt32LE(12);
         return r;
@@ -308,10 +410,123 @@ function createAuthenticodeHandler(path) {
 
     // Read a unicode stting that starts with the string length as the first byte.
     function readLenPrefixUnicodeString(ptr) {
-        var nameLen = readFileSlice(ptr, 1)[0];
-        var buf = readFileSlice(ptr + 1, nameLen * 2), name = '';
-        for (var i = 0; i < nameLen; i++) { name += String.fromCharCode(buf.readUInt16BE(i * 2)); }
+        var nameLen = readFileSlice(ptr, 2).readUInt16LE(0);
+        var buf = readFileSlice(ptr + 2, nameLen * 2), name = '';
+        for (var i = 0; i < nameLen; i++) { name += String.fromCharCode(buf.readUInt16LE(i * 2)); }
         return name;
+    }
+
+    // Generate a complete resource section and pad the section
+    function generateResourceSection(resources) {
+        // Call a resursive method the compute the size needed for each element
+        const resSizes = { tables: 0, items: 0, names: 0, data: 0 };
+        getResourceSectionSize(resources, resSizes);
+
+        // Pad the resource section & allocate the buffer
+        const fileAlign = obj.header.peWindows.fileAlignment
+        var resSizeTotal = resSizes.tables + resSizes.items + resSizes.names + resSizes.data;
+        if ((resSizeTotal % fileAlign) != 0) { resSizeTotal += (fileAlign - (resSizeTotal % fileAlign)); }
+        const resSectionBuffer = Buffer.alloc(resSizeTotal);
+
+        // Write the resource section, calling a recusrize method
+        const resPointers = { tables: 0, items: resSizes.tables, names: resSizes.tables + resSizes.items, data: resSizes.tables + resSizes.items + resSizes.names };
+        createResourceSection(resources, resSectionBuffer, resPointers);
+        //console.log('generateResourceSection', resPointers);
+
+        // Done, return the result
+        return resSectionBuffer;
+    }
+
+    // Return the total size of a resource header, this is a recursive method
+    function getResourceSectionSize(resources, sizes) {
+        sizes.tables += (16 + (resources.entries.length * 8));
+        for (var i in resources.entries) {
+            if (typeof resources.entries[i].name == 'string') {
+                var dataSize = (2 + (resources.entries[i].name.length * 2));
+                if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
+                sizes.names += dataSize;
+            }
+            if (resources.entries[i].table) { getResourceSectionSize(resources.entries[i].table, sizes); }
+            else if (resources.entries[i].item) {
+                sizes.items += 16;
+                var dataSize = resources.entries[i].item.size;
+                if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
+                sizes.data += dataSize;
+            }
+        }
+    }
+
+    // Write the resource section in the buffer, this is a recursive method
+    function createResourceSection(resources, buf, resPointers) {
+        var numberOfNamedEntries = 0, numberOfIdEntries = 0, ptr = resPointers.tables;
+        //console.log('createResourceSection', resPointers, ptr);
+
+        // Figure out how many items we have to save
+        for (var i in resources.entries) {
+            if (typeof resources.entries[i].name == 'string') { numberOfNamedEntries++; } else { numberOfIdEntries++; }
+        }
+
+        // Move the table pointer forward
+        resPointers.tables += (16 + (8 * numberOfNamedEntries) + (8 * numberOfIdEntries));
+
+        // Write the table header
+        buf.writeUInt32LE(resources.characteristics, ptr);
+        buf.writeUInt32LE(resources.timeDateStamp, ptr + 4);
+        buf.writeUInt16LE(resources.majorVersion, ptr + 8);
+        buf.writeUInt16LE(resources.minorVersion, ptr + 10);
+        buf.writeUInt16LE(numberOfNamedEntries, ptr + 12);
+        buf.writeUInt16LE(numberOfIdEntries, ptr + 14);
+
+        // For each table entry, write the entry for it
+        for (var i in resources.entries) {
+            // Write the name
+            var name = resources.entries[i].name;
+            if (typeof resources.entries[i].name == 'string') {
+                // Set the pointer to the name
+                name = resPointers.names + 0x80000000;
+
+                // Write the name length, followed by the name string in unicode
+                buf.writeUInt16LE(resources.entries[i].name.length, resPointers.names);
+                for (var j = 0; j < resources.entries[i].name.length; j++) {
+                    buf.writeUInt16LE(resources.entries[i].name.charCodeAt(j), 2 + resPointers.names + (j * 2));
+                }
+
+                // Move the names pointer forward, 8 byte align
+                var dataSize = (2 + (resources.entries[i].name.length * 2));
+                if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
+                resPointers.names += dataSize;
+            }
+            buf.writeUInt32LE(name, ptr + 16 + (i * 8));
+
+            // Write the data
+            var data;
+            if (resources.entries[i].table) {
+                // This is a pointer to a table entry
+                data = resPointers.tables + 0x80000000;
+                createResourceSection(resources.entries[i].table, buf, resPointers);
+            } else if (resources.entries[i].item) {
+                // This is a pointer to a data entry
+                data = resPointers.items;
+
+                // Write the item entry
+                buf.writeUInt32LE(resPointers.data + obj.header.sections['.rsrc'].virtualAddr, resPointers.items); // Write the pointer relative to the virtual address
+                buf.writeUInt32LE(resources.entries[i].item.size, resPointers.items + 4);
+                buf.writeUInt32LE(resources.entries[i].item.codePage, resPointers.items + 8);
+                buf.writeUInt32LE(resources.entries[i].item.reserved, resPointers.items + 12);
+
+                // Write the data
+                const actualPtr = (resources.entries[i].item.offsetToData - obj.header.sections['.rsrc'].virtualAddr) + obj.header.sections['.rsrc'].rawAddr;
+                const tmp = readFileSlice(actualPtr, resources.entries[i].item.size);
+                tmp.copy(buf, resPointers.data, 0, tmp.length);
+
+                // Move items pointers forward
+                resPointers.items += 16;
+                var dataSize = resources.entries[i].item.size;
+                if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
+                resPointers.data += dataSize;
+            }
+            buf.writeUInt32LE(data, ptr + 20 + (i * 8));
+        }
     }
 
     // Convert a unicode buffer to a string
@@ -515,9 +730,9 @@ function createAuthenticodeHandler(path) {
     // Hash the file using the selected hashing system
     obj.getHash = function(algo) {
         var hash = crypto.createHash(algo);
-        runHash(hash, 0, obj.header.PeHeaderLocation + 88);
-        runHash(hash, obj.header.PeHeaderLocation + 88 + 4, obj.header.PeHeaderLocation + 152 + (obj.header.pe32plus * 16));
-        runHash(hash, obj.header.PeHeaderLocation + 152 + (obj.header.pe32plus * 16) + 8, obj.header.sigpos > 0 ? obj.header.sigpos : obj.filesize);
+        runHash(hash, 0, obj.header.peHeaderLocation + 88);
+        runHash(hash, obj.header.peHeaderLocation + 88 + 4, obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
+        runHash(hash, obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16) + 8, obj.header.sigpos > 0 ? obj.header.sigpos : obj.filesize);
         return hash.digest();
     }
 
@@ -525,6 +740,72 @@ function createAuthenticodeHandler(path) {
     function runHash(hash, start, end) {
         var ptr = start;
         while (ptr < end) { const buf = readFileSlice(ptr, Math.min(65536, end - ptr)); hash.update(buf); ptr += buf.length; }
+    }
+
+    // Checksum the file loading 64k chunks
+    function runChecksum() {
+        var ptr = 0, c = createChecksum(((obj.header.peOptionalHeaderLocation + 64) / 4));
+        while (ptr < obj.filesize) { const buf = readFileSlice(ptr, Math.min(65536, obj.filesize - ptr)); c.update(buf); ptr += buf.length; }
+        return c.digest();
+    }
+
+    // Checksum the open file loading 64k chunks
+    function runChecksumOnFile(fd, filesize, checksumLocation) {
+        var ptr = 0, c = createChecksum(checksumLocation), buf = Buffer.alloc(65536);
+        while (ptr < filesize) { var len = fs.readSync(fd, buf, 0, Math.min(65536, filesize - ptr), ptr); c.update(buf, len); ptr += len; }
+        return c.digest();
+    }
+
+    // Steaming checksum methods
+    // TODO: Works only with files padded to 4 byte.
+    function createChecksum(checksumLocation) {
+        const obj = { checksum: 0, length: 0 };
+        obj.update = function (data, len) {
+            if (!len) { len = data.length; }
+            for (var i = 0; i < (len / 4) ; i++) {
+                if (((obj.length / 4) + i) == checksumLocation) continue; // Skip PE checksum location
+                const dword = data.readUInt32LE(i * 4);
+                var checksumlo = (obj.checksum > 4294967296) ? (obj.checksum - 4294967296) : obj.checksum;
+                var checksumhi = (obj.checksum > 4294967296) ? 1 : 0;
+                obj.checksum = checksumlo + dword + checksumhi;
+                if (obj.checksum > 4294967296) {
+                    checksumlo = (obj.checksum > 4294967296) ? (obj.checksum - 4294967296) : obj.checksum;
+                    checksumhi = (obj.checksum > 4294967296) ? 1 : 0;
+                    obj.checksum = checksumlo + checksumhi;
+                }
+            }
+            obj.length += len;
+        }
+        obj.digest = function () {
+            obj.checksum = (obj.checksum & 0xffff) + (obj.checksum >>> 16);
+            obj.checksum = (obj.checksum) + (obj.checksum >>> 16);
+            obj.checksum = obj.checksum & 0xffff;
+            obj.checksum += obj.length;
+            return obj.checksum;
+        }
+        return obj;
+    }
+
+    // Compute the PE checksum of an entire file
+    function getChecksum(data, checksumLocation) {
+        var checksum = 0;
+        for (var i = 0; i < (data.length / 4) ; i++) {
+            if (i == (checksumLocation / 4)) continue; // Skip PE checksum location
+            var dword = data.readUInt32LE(i * 4);
+            var checksumlo = (checksum > 4294967296) ? (checksum - 4294967296) : checksum;
+            var checksumhi = (checksum > 4294967296) ? 1 : 0;
+            checksum = checksumlo + dword + checksumhi;
+            if (checksum > 4294967296) {
+                checksumlo = (checksum > 4294967296) ? (checksum - 4294967296) : checksum;
+                checksumhi = (checksum > 4294967296) ? 1 : 0;
+                checksum = checksumlo + checksumhi;
+            }
+        }
+        checksum = (checksum & 0xffff) + (checksum >>> 16);
+        checksum = (checksum) + (checksum >>> 16);
+        checksum = checksum & 0xffff;
+        checksum += data.length;
+        return checksum;
     }
 
     // Sign the file using the certificate and key. If none is specified, generate a dummy one
@@ -579,13 +860,13 @@ function createAuthenticodeHandler(path) {
 
         // Open the output file
         var output = null;
-        try { output = fs.openSync(args.out, 'w'); } catch (ex) { }
+        try { output = fs.openSync(args.out, 'w+'); } catch (ex) { }
         if (output == null) return false;
         var tmp, written = 0;
         var executableSize = obj.header.sigpos ? obj.header.sigpos : this.filesize;
 
         // Compute pre-header length and copy that to the new file
-        var preHeaderLen = (obj.header.PeHeaderLocation + 152 + (obj.header.pe32plus * 16));
+        var preHeaderLen = (obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
         var tmp = readFileSlice(written, preHeaderLen);
         fs.writeSync(output, tmp);
         written += tmp.length;
@@ -616,6 +897,12 @@ function createAuthenticodeHandler(path) {
         fs.writeSync(output, win);
         fs.writeSync(output, p7signature);
         if (padding > 0) { fs.writeSync(output, Buffer.alloc(padding, 0)); }
+        written += (p7signature.length + padding + 8);
+
+        // Compute the checksum and write it in the PE header checksum location
+        var tmp = Buffer.alloc(4);
+        tmp.writeUInt32LE(runChecksumOnFile(output, written, ((obj.header.peOptionalHeaderLocation + 64) / 4)));
+        fs.writeSync(output, tmp, 0, 4, obj.header.peOptionalHeaderLocation + 64);
 
         // Close the file
         fs.closeSync(output);
@@ -625,11 +912,11 @@ function createAuthenticodeHandler(path) {
     // Save an executable without the signature
     obj.unsign = function (args) {
         // Open the file
-        var output = fs.openSync(args.out, 'w');
+        var output = fs.openSync(args.out, 'w+');
         var written = 0, totalWrite = obj.header.sigpos;
 
         // Compute pre-header length and copy that to the new file
-        var preHeaderLen = (obj.header.PeHeaderLocation + 152 + (obj.header.pe32plus * 16));
+        var preHeaderLen = (obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
         var tmp = readFileSlice(written, preHeaderLen);
         fs.writeSync(output, tmp);
         written += tmp.length;
@@ -644,6 +931,129 @@ function createAuthenticodeHandler(path) {
             fs.writeSync(output, tmp);
             written += tmp.length;
         }
+
+        // Compute the checksum and write it in the PE checksum header at position
+        var tmp = Buffer.alloc(4);
+        tmp.writeUInt32LE(runChecksumOnFile(output, written));
+        fs.writeSync(output, tmp, 0, 4, obj.header.peOptionalHeaderLocation + 64);
+
+        fs.closeSync(output);
+    }
+
+    // Save the executable
+    obj.writeExecutable = function (args) {
+        // Open the file
+        var output = fs.openSync(args.out, 'w');
+        var tmp, written = 0;
+
+        // Compute the size of the complete executable header up to after the sections header
+        var fullHeaderLen = obj.header.SectionHeadersPtr + (obj.header.coff.numberOfSections * 40);
+        var fullHeader = readFileSlice(written, fullHeaderLen);
+
+        // Calculate the location and original and new size of the resource segment
+        var fileAlign = obj.header.peWindows.fileAlignment
+        var resPtr = obj.header.sections['.rsrc'].rawAddr;
+        var oldResSize = obj.header.sections['.rsrc'].rawSize;
+        var newResSize = obj.header.sections['.rsrc'].rawSize; // Testing 102400
+        var resDeltaSize = newResSize - oldResSize;
+
+        console.log('fileAlign', fileAlign);
+        console.log('resPtr', resPtr);
+        console.log('oldResSize', oldResSize);
+        console.log('newResSize', newResSize);
+        console.log('resDeltaSize', resDeltaSize);
+
+        // Change PE optional header sizeOfInitializedData standard field
+        fullHeader.writeUInt32LE(obj.header.peStandard.sizeOfInitializedData + resDeltaSize, obj.header.peOptionalHeaderLocation + 8);
+        fullHeader.writeUInt32LE(obj.header.peWindows.sizeOfImage, obj.header.peOptionalHeaderLocation + 56); // TODO: resDeltaSize
+
+        // Update the checksum, set to zero since it's not used
+        // TODO: Take a look at computing this correctly in the future
+        fullHeader.writeUInt32LE(0, obj.header.peOptionalHeaderLocation + 64);
+
+        // Make change to the data directories header to fix resource segment size and add/remove signature
+        const pePlusOffset = (obj.header.pe32plus == 0) ? 0 : 16; // This header is the same for 32 and 64 bit, but 64bit is offset by 16 bytes.
+        if (obj.header.dataDirectories.exportTable.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.exportTable.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 96 + pePlusOffset); }
+        if (obj.header.dataDirectories.importTable.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.importTable.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 104 + pePlusOffset); }
+        //fullHeader.writeUInt32LE(obj.header.dataDirectories.resourceTable.size + resDeltaSize, obj.header.peOptionalHeaderLocation + 116 + pePlusOffset); // Change the resource segment size
+        if (obj.header.dataDirectories.exceptionTableAddr.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.exceptionTableAddr.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 120 + pePlusOffset); }
+        fullHeader.writeUInt32LE(0, obj.header.peOptionalHeaderLocation + 128 + pePlusOffset); // certificate table addr (TODO)
+        fullHeader.writeUInt32LE(0, obj.header.peOptionalHeaderLocation + 132 + pePlusOffset); // certificate table size (TODO)
+        if (obj.header.dataDirectories.baseRelocationTable.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.baseRelocationTable.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 136 + pePlusOffset); }
+        if (obj.header.dataDirectories.debug.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.debug.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 144 + pePlusOffset); }
+        if (obj.header.dataDirectories.globalPtr.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.globalPtr.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 160 + pePlusOffset); }
+        if (obj.header.dataDirectories.tLSTable.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.tLSTable.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 168 + pePlusOffset); }
+        if (obj.header.dataDirectories.loadConfigTable.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.loadConfigTable.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 176 + pePlusOffset); }
+        if (obj.header.dataDirectories.boundImport.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.boundImport.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 184 + pePlusOffset); }
+        if (obj.header.dataDirectories.iAT.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.iAT.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 192 + pePlusOffset); }
+        if (obj.header.dataDirectories.delayImportDescriptor.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.delayImportDescriptor.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 200 + pePlusOffset); }
+        if (obj.header.dataDirectories.clrRuntimeHeader.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.clrRuntimeHeader.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 208 + pePlusOffset); }
+
+        // Make changes to the segments table
+        for (var i in obj.header.sections) {
+            const section = obj.header.sections[i];
+            if (i == '.rsrc') {
+                // Change the size of the resource section
+                fullHeader.writeUInt32LE(section.rawSize + resDeltaSize, section.ptr + 8); // virtualSize (TODO)
+                fullHeader.writeUInt32LE(section.rawSize + resDeltaSize, section.ptr + 16); // rawSize
+            } else {
+                // Change the location of any other section if located after the resource section
+                if (section.virtualAddr > resPtr) { fullHeader.writeUInt32LE(section.virtualAddr + resDeltaSize, section.ptr + 12); }
+                if (section.rawAddr > resPtr) { fullHeader.writeUInt32LE(section.rawAddr + resDeltaSize, section.ptr + 20); }
+            }
+        }
+
+        // Write the entire header to the destination file
+        console.log('Write header', fullHeader.length);
+        fs.writeSync(output, fullHeader);
+        written += fullHeader.length;
+
+        // Write the entire executable until the start to the resource segment
+        var totalWrite = resPtr;
+        console.log('Write until res', totalWrite);
+        while ((totalWrite - written) > 0) {
+            tmp = readFileSlice(written, Math.min(totalWrite - written, 65536));
+            fs.writeSync(output, tmp);
+            written += tmp.length;
+        }
+
+        // Write the new resource section
+        var rsrcSection = generateResourceSection(obj.resources);
+        fs.writeSync(output, rsrcSection);
+        written += rsrcSection.length;
+
+        /*
+        // Write the old resource segment (debug)
+        totalWrite = resPtr + oldResSize;
+        console.log('Write res', totalWrite);
+        while ((totalWrite - written) > 0) {
+            tmp = readFileSlice(written, Math.min(totalWrite - written, 65536));
+            fs.writeSync(output, tmp);
+            written += tmp.length;
+        }
+        */
+
+        /*
+        // Write a dummy 102400 bytes
+        tmp = Buffer.alloc(resDeltaSize);
+        console.log('Write dummy', resDeltaSize);
+        fs.writeSync(output, tmp);
+        written += tmp.length;
+        */
+
+        // Write until the signature block
+        totalWrite = obj.header.sigpos + resDeltaSize;
+        console.log('Write until signature', totalWrite);
+        while ((totalWrite - written) > 0) {
+            tmp = readFileSlice(written - resDeltaSize, Math.min(totalWrite - written, 65536));
+            fs.writeSync(output, tmp);
+            written += tmp.length;
+        }
+
+        // Write the signature if needed
+        // TODO
+
+        // Close the file
         fs.closeSync(output);
     }
 
@@ -690,7 +1100,7 @@ function start() {
     }
 
     // Check that a valid command is passed in
-    if (['info', 'sign', 'unsign', 'createcert', 'icons', 'saveicon'].indexOf(process.argv[2].toLowerCase()) == -1) {
+    if (['info', 'sign', 'unsign', 'createcert', 'icons', 'saveicon', 'header', 'test'].indexOf(process.argv[2].toLowerCase()) == -1) {
         console.log("Invalid command: " + process.argv[2]);
         console.log("Valid commands are: info, sign, unsign, createcert");
         return;
@@ -703,6 +1113,7 @@ function start() {
         try { stats = require('fs').statSync(args.exe); } catch (ex) { }
         if (stats == null) { console.log("Unable to executable open file: " + args.exe); return; }
         exe = createAuthenticodeHandler(args.exe);
+        if (exe == null) { console.log("Unable to parse executable file: " + args.exe); return; }
     }
 
     // Execute the command
@@ -723,6 +1134,9 @@ function start() {
         } else {
             var versionInfo = exe.getVersionInfo();
             if (versionInfo != null) { console.log("Version Information:"); for (var i in versionInfo) { if (versionInfo[i] == null) { console.log('  ' + i + ': (Empty)'); } else { console.log('  ' + i + ': \"' + versionInfo[i] + '\"'); } } }
+            console.log("Checksum Information:");
+            console.log("  Header CheckSum: 0x" + exe.header.peWindows.checkSum.toString(16));
+            console.log("  Actual CheckSum: 0x" + exe.header.peWindows.checkSumActual.toString(16));
             console.log("Signature Information:");
             if (exe.fileHashAlgo != null) {
                 console.log("  Hash Method:", exe.fileHashAlgo);
@@ -733,6 +1147,10 @@ function start() {
             }
             if (exe.signingAttribs && exe.signingAttribs.length > 0) { console.log("Signature Attributes:"); for (var i in exe.signingAttribs) { console.log('  ' + exe.signingAttribs[i]); } }
         }
+    }
+    if (command == 'header') { // Display the full executable header in JSON format
+        if (exe == null) { console.log("Missing --exe [filename]"); return; }
+        console.log(exe.header);
     }
     if (command == 'sign') { // Sign an executable
         if (typeof args.exe != 'string') { console.log("Missing --exe [filename]"); return; }
@@ -795,6 +1213,18 @@ function start() {
         console.log("Writing to " + args.out);
         fs.writeFileSync(args.out, Buffer.concat([buf, icon.icon]));
         console.log("Done.");
+    }
+    if (command == 'test') { // Grow the resource segment by 100k
+        if (exe == null) { console.log("Missing --exe [filename]"); return; }
+        createOutFile(args, args.exe);
+        console.log("Writting to " + args.out);
+        exe.resourcesChanged = true; // Indicate the resources have changed
+        exe.writeExecutable(args);
+
+        // Parse the output file
+        var exe2 = createAuthenticodeHandler(args.out);
+        if (exe2 == null) { console.log("Unable to parse output executable file: " + args.out); return; }
+        console.log('Output executable parsed correctly.');
     }
 
     // Close the file
