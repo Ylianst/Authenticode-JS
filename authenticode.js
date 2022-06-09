@@ -120,7 +120,7 @@ function createAuthenticodeHandler(path) {
 
         // Open the file descriptor
         obj.path = path;
-        try { obj.fd = fs.openSync(path); } catch (ex) { return false; } // Unable to open file
+        try { obj.fd = fs.openSync(path, 'r'); } catch (ex) { return false; } // Unable to open file
         obj.stats = fs.fstatSync(obj.fd);
         obj.filesize = obj.stats.size;
         if (obj.filesize < 64) { obj.close(); return false; } // File too short.
@@ -172,7 +172,7 @@ function createAuthenticodeHandler(path) {
         obj.header.peWindows = {}
         if (obj.header.pe32plus == 0) {
             // 32bit header
-            obj.header.peWindows.imageBase = optinalHeader.readUInt32LE(28);
+            //obj.header.peWindows.imageBase = optinalHeader.readUInt32LE(28);
             obj.header.peWindows.sectionAlignment = optinalHeader.readUInt32LE(32);
             obj.header.peWindows.fileAlignment = optinalHeader.readUInt32LE(36);
             obj.header.peWindows.majorOperatingSystemVersion = optinalHeader.readUInt16LE(40);
@@ -187,15 +187,15 @@ function createAuthenticodeHandler(path) {
             obj.header.peWindows.checkSum = optinalHeader.readUInt32LE(64);
             obj.header.peWindows.subsystem = optinalHeader.readUInt16LE(68);
             obj.header.peWindows.dllCharacteristics = optinalHeader.readUInt16LE(70);
-            obj.header.peWindows.sizeOfStackReserve = optinalHeader.readUInt32LE(72);
-            obj.header.peWindows.sizeOfStackCommit = optinalHeader.readUInt32LE(76);
-            obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readUInt32LE(80);
-            obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readUInt32LE(84);
+            //obj.header.peWindows.sizeOfStackReserve = optinalHeader.readUInt32LE(72);
+            //obj.header.peWindows.sizeOfStackCommit = optinalHeader.readUInt32LE(76);
+            //obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readUInt32LE(80);
+            //obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readUInt32LE(84);
             obj.header.peWindows.loaderFlags = optinalHeader.readUInt32LE(88);
             obj.header.peWindows.numberOfRvaAndSizes = optinalHeader.readUInt32LE(92);
         } else {
             // 64bit header
-            obj.header.peWindows.imageBase = optinalHeader.readBigUInt64LE(24);
+            //obj.header.peWindows.imageBase = optinalHeader.readBigUInt64LE(24); // TODO: readBigUInt64LE is not supported in older NodeJS versions
             obj.header.peWindows.sectionAlignment = optinalHeader.readUInt32LE(32);
             obj.header.peWindows.fileAlignment = optinalHeader.readUInt32LE(36);
             obj.header.peWindows.majorOperatingSystemVersion = optinalHeader.readUInt16LE(40);
@@ -210,10 +210,10 @@ function createAuthenticodeHandler(path) {
             obj.header.peWindows.checkSum = optinalHeader.readUInt32LE(64);
             obj.header.peWindows.subsystem = optinalHeader.readUInt16LE(68);
             obj.header.peWindows.dllCharacteristics = optinalHeader.readUInt16LE(70);
-            obj.header.peWindows.sizeOfStackReserve = optinalHeader.readBigUInt64LE(72);
-            obj.header.peWindows.sizeOfStackCommit = optinalHeader.readBigUInt64LE(80);
-            obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readBigUInt64LE(88);
-            obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readBigUInt64LE(96);
+            //obj.header.peWindows.sizeOfStackReserve = optinalHeader.readBigUInt64LE(72);
+            //obj.header.peWindows.sizeOfStackCommit = optinalHeader.readBigUInt64LE(80);
+            //obj.header.peWindows.sizeOfHeapReserve = optinalHeader.readBigUInt64LE(88);
+            //obj.header.peWindows.sizeOfHeapCommit = optinalHeader.readBigUInt64LE(96);
             obj.header.peWindows.loaderFlags = optinalHeader.readUInt32LE(104);
             obj.header.peWindows.numberOfRvaAndSizes = optinalHeader.readUInt32LE(108);
         }
@@ -404,7 +404,7 @@ function createAuthenticodeHandler(path) {
         r.size = buf.readUInt32LE(4);
         //console.log('readResourceData', r.offsetToData - obj.header.sections['.rsrc'].virtualAddr, r.size, r.offsetToData + r.size - obj.header.sections['.rsrc'].virtualAddr);
         r.codePage = buf.readUInt32LE(8);
-        r.reserved = buf.readUInt32LE(12);
+        //r.reserved = buf.readUInt32LE(12);
         return r;
     }
 
@@ -449,9 +449,13 @@ function createAuthenticodeHandler(path) {
             if (resources.entries[i].table) { getResourceSectionSize(resources.entries[i].table, sizes); }
             else if (resources.entries[i].item) {
                 sizes.items += 16;
-                var dataSize = resources.entries[i].item.size;
-                if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
-                sizes.data += dataSize;
+                if (resources.entries[i].item.buffer) {
+                    sizes.data += resources.entries[i].item.buffer.length;
+                } else {
+                    var dataSize = resources.entries[i].item.size;
+                    if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
+                    sizes.data += dataSize;
+                }
             }
         }
     }
@@ -508,20 +512,29 @@ function createAuthenticodeHandler(path) {
                 // This is a pointer to a data entry
                 data = resPointers.items;
 
+                // Write the data
+                var entrySize = 0;
+                if (resources.entries[i].item.buffer) {
+                    // Write the data from given buffer
+                    resources.entries[i].item.buffer.copy(buf, resPointers.data, 0, resources.entries[i].item.buffer.length);
+                    entrySize = resources.entries[i].item.buffer.length;
+                } else {
+                    // Write the data from original file
+                    const actualPtr = (resources.entries[i].item.offsetToData - obj.header.sections['.rsrc'].virtualAddr) + obj.header.sections['.rsrc'].rawAddr;
+                    const tmp = readFileSlice(actualPtr, resources.entries[i].item.size);
+                    tmp.copy(buf, resPointers.data, 0, tmp.length);
+                    entrySize = resources.entries[i].item.size;;
+                }
+
                 // Write the item entry
                 buf.writeUInt32LE(resPointers.data + obj.header.sections['.rsrc'].virtualAddr, resPointers.items); // Write the pointer relative to the virtual address
-                buf.writeUInt32LE(resources.entries[i].item.size, resPointers.items + 4);
+                buf.writeUInt32LE(entrySize, resPointers.items + 4);
                 buf.writeUInt32LE(resources.entries[i].item.codePage, resPointers.items + 8);
                 buf.writeUInt32LE(resources.entries[i].item.reserved, resPointers.items + 12);
 
-                // Write the data
-                const actualPtr = (resources.entries[i].item.offsetToData - obj.header.sections['.rsrc'].virtualAddr) + obj.header.sections['.rsrc'].rawAddr;
-                const tmp = readFileSlice(actualPtr, resources.entries[i].item.size);
-                tmp.copy(buf, resPointers.data, 0, tmp.length);
-
                 // Move items pointers forward
                 resPointers.items += 16;
-                var dataSize = resources.entries[i].item.size;
+                var dataSize = entrySize;
                 if ((dataSize % 8) != 0) { dataSize += (8 - (dataSize % 8)); }
                 resPointers.data += dataSize;
             }
@@ -531,17 +544,19 @@ function createAuthenticodeHandler(path) {
 
     // Convert a unicode buffer to a string
     function unicodeToString(buf) {
-        var r = '';
-        for (var i = 0; i < (buf.length / 2) ; i++) { r += String.fromCharCode(buf.readUInt16LE(i * 2)); }
+        var r = '', c;
+        for (var i = 0; i < (buf.length / 2) ; i++) {
+            c = buf.readUInt16LE(i * 2);
+            if (c != 0) { r += String.fromCharCode(c); } else { return r; }
+        }
         return r;
     }
 
-    // Trim a string at teh first null character
-    function stringUntilNull(str) {
-        if (str == null) return null;
-        const i = str.indexOf('\0');
-        if (i >= 0) return str.substring(0, i);
-        return str;
+    // Convert a string to a unicode buffer
+    // Input is a string, a buffer to write to and the offset in the buffer (0 is default).
+    function stringToUnicode(str, buf, offset) {
+        if (offset == null) { offset = 0; }
+        for (var i = 0; i < str.length; i++) { buf.writeInt16LE(str.charCodeAt(i), offset + (i * 2)); }
     }
 
     var resourceDefaultNames = {
@@ -612,6 +627,7 @@ function createAuthenticodeHandler(path) {
 
     // Decode the version information from the resource
     obj.getVersionInfo = function () {
+        //console.log('READ', getVersionInfoData().toString('hex'));
         var r = {}, info = readVersionInfo(getVersionInfoData(), 0);
         if ((info == null) || (info.stringFiles == null)) return null;
         var StringFileInfo = null;
@@ -622,6 +638,43 @@ function createAuthenticodeHandler(path) {
         return r;
     }
 
+    // Encode the version information to the resource
+    obj.setVersionInfo = function (versions) {
+        // Convert the version information into a string array
+        const stringArray = [];
+        for (var i in versions) { stringArray.push({ key: i, value: versions[i] }); }
+
+        // Get the existing version data and switch the strings to the new strings
+        var r = {}, info = readVersionInfo(getVersionInfoData(), 0);
+        if ((info == null) || (info.stringFiles == null)) return;
+        var StringFileInfo = null;
+        for (var i in info.stringFiles) { if (info.stringFiles[i].szKey == 'StringFileInfo') { StringFileInfo = info.stringFiles[i]; } }
+        if ((StringFileInfo == null) || (StringFileInfo.stringTable == null) || (StringFileInfo.stringTable.strings == null)) return;
+        StringFileInfo.stringTable.strings = stringArray;
+
+        // Re-encode the version information into a buffer
+        var verInfoResBufArray = [];
+        writeVersionInfo(verInfoResBufArray, info);
+        var verInfoRes = Buffer.concat(verInfoResBufArray);
+
+        // Display all buffers
+        //console.log('--WRITE BUF ARRAY START--');
+        //for (var i in verInfoResBufArray) { console.log(verInfoResBufArray[i].toString('hex')); }
+        //console.log('--WRITE BUF ARRAY END--');
+        //console.log('OUT', Buffer.concat(verInfoResBufArray).toString('hex'));
+
+        // Set the new buffer as part of the resources
+        for (var i = 0; i < obj.resources.entries.length; i++) {
+            if (obj.resources.entries[i].name == resourceDefaultNames.versionInfo) {
+                const verInfo = obj.resources.entries[i].table.entries[0].table.entries[0].item;
+                delete verInfo.size;
+                delete verInfo.offsetToData;
+                verInfo.buffer = verInfoRes;
+                obj.resources.entries[i].table.entries[0].table.entries[0].item = verInfo;
+            }
+        }
+    }
+
     // Return the version info data block
     function getVersionInfoData() {
         if (obj.resources == null) return null;
@@ -629,26 +682,169 @@ function createAuthenticodeHandler(path) {
         for (var i = 0; i < obj.resources.entries.length; i++) {
             if (obj.resources.entries[i].name == resourceDefaultNames.versionInfo) {
                 const verInfo = obj.resources.entries[i].table.entries[0].table.entries[0].item;
-                const actualPtr = (verInfo.offsetToData - obj.header.sections['.rsrc'].virtualAddr) + ptr;
-                return readFileSlice(actualPtr, verInfo.size);
+                if (verInfo.buffer != null) {
+                    return verInfo.buffer;
+                } else {
+                    const actualPtr = (verInfo.offsetToData - obj.header.sections['.rsrc'].virtualAddr) + ptr;
+                    return readFileSlice(actualPtr, verInfo.size);
+                }
             }
         }
         return null;
+    }
+
+    // Create a VS_VERSIONINFO structure as a array of buffer that is ready to be placed in the resource section
+    // VS_VERSIONINFO structure: https://docs.microsoft.com/en-us/windows/win32/menurc/vs-versioninfo
+    function writeVersionInfo(bufArray, info) {
+        const buf = Buffer.alloc(40);
+        buf.writeUInt16LE(0, 4); // wType
+        stringToUnicode('VS_VERSION_INFO', buf, 6);
+        bufArray.push(buf);
+
+        var wLength = 40;
+        var wValueLength = 0;
+        if (info.fixedFileInfo != null) {
+            const buf2 = Buffer.alloc(52);
+            wLength += 52;
+            wValueLength += 52;
+            buf2.writeUInt32LE(info.fixedFileInfo.dwSignature, 0); // dwSignature
+            buf2.writeUInt32LE(info.fixedFileInfo.dwStrucVersion, 4); // dwStrucVersion
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileVersionMS, 8); // dwFileVersionMS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileVersionLS, 12); // dwFileVersionLS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwProductVersionMS, 16); // dwProductVersionMS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwProductVersionLS, 20); // dwProductVersionLS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileFlagsMask, 24); // dwFileFlagsMask
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileFlags, 28); // dwFileFlags
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileOS, 32); // dwFileOS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileType, 36); // dwFileType
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileSubtype, 40); // dwFileSubtype
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileDateMS, 44); // dwFileDateMS
+            buf2.writeUInt32LE(info.fixedFileInfo.dwFileDateLS, 48); // dwFileDateLS
+            bufArray.push(buf2);
+        }
+
+        if (info.stringFiles != null) { wLength += writeStringFileInfo(bufArray, info.stringFiles); }
+
+        buf.writeUInt16LE(Buffer.concat(bufArray).length, 0); // wLength
+        buf.writeUInt16LE(wValueLength, 2); // wValueLength
+        return wLength;
+    }
+
+    // StringFileInfo structure: https://docs.microsoft.com/en-us/windows/win32/menurc/stringfileinfo
+    function writeStringFileInfo(bufArray, stringFiles) {
+        var totalLen = 0;
+        for (var i in stringFiles) {
+            var l = 6 + (stringFiles[i].szKey.length * 2);
+            if (stringFiles[i].szKey == 'VarFileInfo') { l += 4; } // TODO: This is a hack, not sure what the correct code should be
+            const buf2 = Buffer.alloc(padPointer(l));
+            buf2.writeUInt16LE(1, 4); // wType
+            stringToUnicode(stringFiles[i].szKey, buf2, 6);
+            bufArray.push(buf2);
+
+            var wLength = 0, wValueLength = 0;
+
+            if (stringFiles[i].szKey == 'StringFileInfo') { wLength += writeStringTableStruct(bufArray, stringFiles[i].stringTable); }
+            if (stringFiles[i].szKey == 'VarFileInfo') { wLength += writeVarFileInfoStruct(bufArray, stringFiles[i].varFileInfo); }
+
+            buf2.writeUInt16LE(l + wLength, 0); // wLength
+            buf2.writeUInt16LE(wValueLength, 2); // wValueLength
+            totalLen += buf2.length + wLength;
+        }
+        return totalLen;
+    }
+
+    // VarFileInfo structure: https://docs.microsoft.com/en-us/windows/win32/menurc/var-str
+    function writeVarFileInfoStruct(bufArray, varFileInfo) {
+        var l = 8 + (varFileInfo.szKey.length * 2);
+        const buf = Buffer.alloc(padPointer(l));
+        buf.writeUInt16LE(0, 4); // wType
+        stringToUnicode(varFileInfo.szKey, buf, 6);
+        bufArray.push(buf);
+
+        var wLength = 0;
+        var wValueLength = 0;
+
+        if (varFileInfo.value) {
+            bufArray.push(varFileInfo.value);
+            wLength += varFileInfo.value.length;
+            wValueLength += varFileInfo.value.length;
+        }
+        buf.writeUInt16LE(buf.length + wLength, 0); // wLength
+        buf.writeUInt16LE(wValueLength, 2); // wValueLength
+        return buf.length + wLength;
+    }
+
+    // StringTable structure: https://docs.microsoft.com/en-us/windows/win32/menurc/stringtable
+    function writeStringTableStruct(bufArray, stringTable) {
+        //console.log('writeStringTableStruct', stringTable);
+        var l = 6 + (stringTable.szKey.length * 2);
+        const buf = Buffer.alloc(padPointer(l));
+        buf.writeUInt16LE(1, 4); // wType
+        stringToUnicode(stringTable.szKey, buf, 6);
+        bufArray.push(buf);
+
+        var wLength = 0;
+        var wValueLength = 0;
+
+        if (stringTable.strings) { wLength += writeStringStructs(bufArray, stringTable.strings); }
+        buf.writeUInt16LE(l + wLength, 0); // wLength
+        buf.writeUInt16LE(wValueLength, 2); // wValueLength
+        return buf.length + wLength;
+    }
+
+    // String structure: https://docs.microsoft.com/en-us/windows/win32/menurc/string-str
+    function writeStringStructs(bufArray, stringTable) {
+        //console.log('writeStringStructs', stringTable);
+        var totalLen = 0, bufadd = 0;
+        for (var i in stringTable) {
+            //console.log('writeStringStructs', stringTable[i]);
+            const buf = Buffer.alloc(padPointer(6 + ((stringTable[i].key.length + 1) * 2)));
+            var buf2, wLength = buf.length;
+            var wValueLength = 0;
+            stringToUnicode(stringTable[i].key, buf, 6);
+            bufArray.push(buf);
+            bufadd += buf.length;
+            if (typeof stringTable[i].value == 'string') {
+                // wType (string)
+                buf.writeUInt16LE(1, 4);
+                var l = (stringTable[i].value.length + 1) * 2;
+                buf2 = Buffer.alloc(padPointer(l));
+                stringToUnicode(stringTable[i].value, buf2, 0);
+                bufArray.push(buf2);
+                bufadd += buf2.length;
+                wValueLength = stringTable[i].value.length + 1;
+                wLength += l;
+            }
+            if (typeof stringTable[i].value == 'object') {
+                // wType (binary)
+                buf.writeUInt16LE(2, 4); // TODO: PADDING
+                bufArray.push(stringTable[i].value);
+                bufadd += stringTable[i].value.length;
+                wValueLength = stringTable[i].value.length;
+                wLength += wValueLength;
+            }
+            buf.writeUInt16LE(wLength, 0); // wLength
+            buf.writeUInt16LE(wValueLength, 2); // wValueLength
+            //console.log('WStringStruct', buf.toString('hex'), buf2.toString('hex'));
+            totalLen += wLength;
+        }
+        //return totalLen;
+        return bufadd;
     }
 
     // VS_VERSIONINFO structure: https://docs.microsoft.com/en-us/windows/win32/menurc/vs-versioninfo
     function readVersionInfo(buf, ptr) {
         const r = {};
         if (buf.length < 2) return null;
-        r.wLength = buf.readUInt16LE(ptr);
-        if (buf.length < r.wLength) return null;
-        r.wValueLength = buf.readUInt16LE(ptr + 2);
-        r.wType = buf.readUInt16LE(ptr + 4);
+        const wLength = buf.readUInt16LE(ptr);
+        if (buf.length < wLength) return null;
+        const wValueLength = buf.readUInt16LE(ptr + 2);
+        const wType = buf.readUInt16LE(ptr + 4);
         r.szKey = unicodeToString(buf.slice(ptr + 6, ptr + 36));
         if (r.szKey != 'VS_VERSION_INFO') return null;
-        //console.log('getVersionInfo', r.wLength, r.wValueLength, r.wType, r.szKey.toString());
-        if (r.wValueLength == 52) { r.fixedFileInfo = readFixedFileInfoStruct(buf, ptr + 40); }
-        r.stringFiles = readStringFilesStruct(buf, ptr + 40 + r.wValueLength, r.wLength - 40 - r.wValueLength);
+        //console.log('getVersionInfo', wLength, wValueLength, wType, r.szKey.toString());
+        if (wValueLength == 52) { r.fixedFileInfo = readFixedFileInfoStruct(buf, ptr + 40); }
+        r.stringFiles = readStringFilesStruct(buf, ptr + 40 + wValueLength, wLength - 40 - wValueLength);
         return r;
     }
 
@@ -678,54 +874,75 @@ function createAuthenticodeHandler(path) {
         var t = [], startPtr = ptr;
         while (ptr < (startPtr + len)) {
             const r = {};
-            r.wLength = buf.readUInt16LE(ptr);
-            if (r.wLength == 0) return t;
-            r.wValueLength = buf.readUInt16LE(ptr + 2);
-            r.wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
-            r.szKey = stringUntilNull(unicodeToString(buf.slice(ptr + 6, ptr + 6 + (r.wLength - 6)))); // String value
-            //console.log('readStringFileStruct', r.wLength, r.wValueLength, r.wType, r.szKey.toString());
-            if (r.szKey == 'StringFileInfo') { r.stringTable = readStringTableStruct(buf, ptr + 36 + r.wValueLength); }
-            if (r.szKey == 'VarFileInfo$') { r.varFileInfo = {}; } // TODO
+            const wLength = buf.readUInt16LE(ptr);
+            if (wLength == 0) return t;
+            const wValueLength = buf.readUInt16LE(ptr + 2);
+            const wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
+            r.szKey = unicodeToString(buf.slice(ptr + 6, ptr + 6 + (wLength - 6))); // String value
+            //console.log('readStringFileStruct', wLength, wValueLength, wType, r.szKey);
+            if (r.szKey == 'StringFileInfo') { r.stringTable = readStringTableStruct(buf, ptr + 36); }
+            if (r.szKey == 'VarFileInfo') { r.varFileInfo = readVarFileInfoStruct(buf, ptr + 32); }
             t.push(r);
-            ptr += r.wLength;
+            ptr += wLength;
             ptr = padPointer(ptr);
         }
         return t;
     }
 
+    // VarFileInfo structure: https://docs.microsoft.com/en-us/windows/win32/menurc/var-str
+    function readVarFileInfoStruct(buf, ptr) {
+        const r = {};
+        const wLength = buf.readUInt16LE(ptr);
+        const wValueLength = buf.readUInt16LE(ptr + 2);
+        const wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
+        r.szKey = unicodeToString(buf.slice(ptr + 6, ptr + wLength)); // "VarFileInfo"
+        r.value = buf.slice(ptr + wLength - wValueLength, ptr + wLength)
+        //console.log('readVarFileInfoStruct', wLength, wValueLength, wType, r.szKey, r.value.toString('hex'));
+        return r;
+    }
+
     // StringTable structure: https://docs.microsoft.com/en-us/windows/win32/menurc/stringtable
     function readStringTableStruct(buf, ptr) {
         const r = {};
-        r.wLength = buf.readUInt16LE(ptr);
-        r.wValueLength = buf.readUInt16LE(ptr + 2);
-        r.wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
+        const wLength = buf.readUInt16LE(ptr);
+        const wValueLength = buf.readUInt16LE(ptr + 2);
+        const wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
+        //console.log('RStringTableStruct', buf.slice(ptr, ptr + wLength).toString('hex'));
         r.szKey = unicodeToString(buf.slice(ptr + 6, ptr + 6 + 16)); // An 8-digit hexadecimal number stored as a Unicode string.
-        //console.log('readStringTableStruct', r.wLength, r.wValueLength, r.wType, r.szKey);
-        r.strings = readStringStructs(buf, ptr + 24 + r.wValueLength, r.wLength - 22);
+        //console.log('readStringTableStruct', wLength, wValueLength, wType, r.szKey);
+        r.strings = readStringStructs(buf, ptr + 24 + wValueLength, wLength - 22);
         return r;
     }
 
     // String structure: https://docs.microsoft.com/en-us/windows/win32/menurc/string-str
     function readStringStructs(buf, ptr, len) {
         var t = [], startPtr = ptr;
-        while (ptr < (startPtr + len)) {
+        while ((ptr + 6) < (startPtr + len)) {
             const r = {};
-            r.wLength = buf.readUInt16LE(ptr);
-            if (r.wLength == 0) return t;
-            r.wValueLength = buf.readUInt16LE(ptr + 2);
-            r.wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
-            r.key = unicodeToString(buf.slice(ptr + 6, ptr + (r.wLength - (r.wValueLength * 2)))); // Key
-            r.value = unicodeToString(buf.slice(ptr + r.wLength - (r.wValueLength * 2), ptr + r.wLength)); // Value
-            //console.log('readStringStruct', r.wLength, r.wValueLength, r.wType, r.key, r.value);
+            const wLength = buf.readUInt16LE(ptr);
+            if (wLength == 0) return t;
+
+            //console.log('RStringStruct', buf.slice(ptr, ptr + wLength).toString('hex'));
+
+            const wValueLength = buf.readUInt16LE(ptr + 2);
+            const wType = buf.readUInt16LE(ptr + 4); // 1 = Text, 2 = Binary
+
+            //console.log('R', buf.slice(ptr, ptr + wLength).toString('hex'));
+
+            r.key = unicodeToString(buf.slice(ptr + 6, ptr + (wLength - (wValueLength * 2)) - 2)); // Key
+            if (wType == 1) { r.value = unicodeToString(buf.slice(ptr + wLength - (wValueLength * 2), ptr + wLength - 2)); } // String value
+            if (wType == 2) { r.value = buf.slice(ptr + wLength - (wValueLength * 2), ptr + wLength); } // Binary value
+            //console.log('readStringStruct', wLength, wValueLength, wType, r.key, r.value);
             t.push(r);
-            ptr += r.wLength;
+            ptr += wLength;
             ptr = padPointer(ptr);
         }
         return t;
     }
 
     // Return the next 4 byte aligned number
-    function padPointer(ptr) { return ptr + (ptr % 4); }
+    function padPointer(ptr) { return ptr + (((ptr % 4) == 0) ? 0 : (4 - (ptr % 4))); }
+    //function padPointer(ptr) { return ptr + (ptr % 4); }
 
     // Hash the file using the selected hashing system
     obj.getHash = function(algo) {
@@ -736,10 +953,28 @@ function createAuthenticodeHandler(path) {
         return hash.digest();
     }
 
+    // Hash of an open file using the selected hashing system
+    obj.getHashOfFile = function (fd, algo, filesize) {
+        var hash = crypto.createHash(algo);
+        runHashOnFile(fd, hash, 0, obj.header.peHeaderLocation + 88);
+        runHashOnFile(fd, hash, obj.header.peHeaderLocation + 88 + 4, obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
+        runHashOnFile(fd, hash, obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16) + 8, obj.header.sigpos > 0 ? obj.header.sigpos : filesize);
+        return hash.digest();
+    }
+
     // Hash the file from start to end loading 64k chunks
     function runHash(hash, start, end) {
         var ptr = start;
         while (ptr < end) { const buf = readFileSlice(ptr, Math.min(65536, end - ptr)); hash.update(buf); ptr += buf.length; }
+    }
+
+    // Hash the open file loading 64k chunks
+    // TODO: Do chunks on this!!!
+    function runHashOnFile(fd, hash, start, end) {
+        var buf = Buffer.alloc(end - start);
+        var len = fs.readSync(fd, buf, 0, buf.length, start);
+        if (len != buf.length) { console.log('BAD runHashOnFile'); }
+        hash.update(buf);
     }
 
     // Checksum the file loading 64k chunks
@@ -941,9 +1176,9 @@ function createAuthenticodeHandler(path) {
     }
 
     // Save the executable
-    obj.writeExecutable = function (args) {
+    obj.writeExecutable = function (args, cert) {
         // Open the file
-        var output = fs.openSync(args.out, 'w');
+        var output = fs.openSync(args.out, 'w+');
         var tmp, written = 0;
 
         // Compute the size of the complete executable header up to after the sections header
@@ -957,18 +1192,11 @@ function createAuthenticodeHandler(path) {
         var newResSize = obj.header.sections['.rsrc'].rawSize; // Testing 102400
         var resDeltaSize = newResSize - oldResSize;
 
-        console.log('fileAlign', fileAlign);
-        console.log('resPtr', resPtr);
-        console.log('oldResSize', oldResSize);
-        console.log('newResSize', newResSize);
-        console.log('resDeltaSize', resDeltaSize);
-
         // Change PE optional header sizeOfInitializedData standard field
         fullHeader.writeUInt32LE(obj.header.peStandard.sizeOfInitializedData + resDeltaSize, obj.header.peOptionalHeaderLocation + 8);
         fullHeader.writeUInt32LE(obj.header.peWindows.sizeOfImage, obj.header.peOptionalHeaderLocation + 56); // TODO: resDeltaSize
 
-        // Update the checksum, set to zero since it's not used
-        // TODO: Take a look at computing this correctly in the future
+        // Update the checksum to zero
         fullHeader.writeUInt32LE(0, obj.header.peOptionalHeaderLocation + 64);
 
         // Make change to the data directories header to fix resource segment size and add/remove signature
@@ -1004,13 +1232,13 @@ function createAuthenticodeHandler(path) {
         }
 
         // Write the entire header to the destination file
-        console.log('Write header', fullHeader.length);
+        //console.log('Write header', fullHeader.length);
         fs.writeSync(output, fullHeader);
         written += fullHeader.length;
 
         // Write the entire executable until the start to the resource segment
         var totalWrite = resPtr;
-        console.log('Write until res', totalWrite);
+        //console.log('Write until res', totalWrite);
         while ((totalWrite - written) > 0) {
             tmp = readFileSlice(written, Math.min(totalWrite - written, 65536));
             fs.writeSync(output, tmp);
@@ -1022,28 +1250,9 @@ function createAuthenticodeHandler(path) {
         fs.writeSync(output, rsrcSection);
         written += rsrcSection.length;
 
-        /*
-        // Write the old resource segment (debug)
-        totalWrite = resPtr + oldResSize;
-        console.log('Write res', totalWrite);
-        while ((totalWrite - written) > 0) {
-            tmp = readFileSlice(written, Math.min(totalWrite - written, 65536));
-            fs.writeSync(output, tmp);
-            written += tmp.length;
-        }
-        */
-
-        /*
-        // Write a dummy 102400 bytes
-        tmp = Buffer.alloc(resDeltaSize);
-        console.log('Write dummy', resDeltaSize);
-        fs.writeSync(output, tmp);
-        written += tmp.length;
-        */
-
         // Write until the signature block
         totalWrite = obj.header.sigpos + resDeltaSize;
-        console.log('Write until signature', totalWrite);
+        //console.log('Write until signature', totalWrite);
         while ((totalWrite - written) > 0) {
             tmp = readFileSlice(written - resDeltaSize, Math.min(totalWrite - written, 65536));
             fs.writeSync(output, tmp);
@@ -1051,7 +1260,81 @@ function createAuthenticodeHandler(path) {
         }
 
         // Write the signature if needed
-        // TODO
+        if (cert != null) {
+            //if (cert == null) { cert = createSelfSignedCert({ cn: 'Test' }); }
+
+            // Set the hash algorithm hash OID
+            var hashOid = null, fileHash = null;
+            if (args.hash == null) { args.hash = 'sha384'; }
+            if (args.hash == 'sha256') { hashOid = forge.pki.oids.sha256; fileHash = obj.getHashOfFile(output, 'sha256', written); }
+            if (args.hash == 'sha384') { hashOid = forge.pki.oids.sha384; fileHash = obj.getHashOfFile(output, 'sha384', written); }
+            if (args.hash == 'sha512') { hashOid = forge.pki.oids.sha512; fileHash = obj.getHashOfFile(output, 'sha512', written); }
+            if (args.hash == 'sha224') { hashOid = forge.pki.oids.sha224; fileHash = obj.getHashOfFile(output, 'sha224', written); }
+            if (args.hash == 'md5') { hashOid = forge.pki.oids.md5; fileHash = obj.getHashOfFile(output, 'md5', written); }
+            if (hashOid == null) return false;
+
+            // Create the signature block
+            var p7 = forge.pkcs7.createSignedData();
+            var content = { 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 0, 'type': 6, 'constructed': false, 'composed': false, 'value': forge.asn1.oidToDer('1.3.6.1.4.1.311.2.1.15').data }, { 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 0, 'type': 3, 'constructed': false, 'composed': false, 'value': '\u0000', 'bitStringContents': '\u0000', 'original': { 'tagClass': 0, 'type': 3, 'constructed': false, 'composed': false, 'value': '\u0000' } }, { 'tagClass': 128, 'type': 0, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 128, 'type': 2, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 128, 'type': 0, 'constructed': false, 'composed': false, 'value': '' }] }] }] }] }, { 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 0, 'type': 6, 'constructed': false, 'composed': false, 'value': forge.asn1.oidToDer(hashOid).data }, { 'tagClass': 0, 'type': 5, 'constructed': false, 'composed': false, 'value': '' }] }, { 'tagClass': 0, 'type': 4, 'constructed': false, 'composed': false, 'value': fileHash.toString('binary') }] }] };
+            p7.contentInfo = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, forge.asn1.oidToDer('1.3.6.1.4.1.311.2.1.4').getBytes())]);
+            p7.contentInfo.value.push(forge.asn1.create(forge.asn1.Class.CONTEXT_SPECIFIC, 0, true, [content]));
+            p7.content = {}; // We set .contentInfo and have .content empty to bypass node-forge limitation on the type of content it can sign.
+            p7.addCertificate(cert.cert);
+            if (cert.extraCerts) { for (var i = 0; i < cert.extraCerts.length; i++) { p7.addCertificate(cert.extraCerts[0]); } } // Add any extra certificates that form the cert chain
+
+            // Build authenticated attributes
+            var authenticatedAttributes = [
+                { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
+                { type: forge.pki.oids.messageDigest } // This value will populated at signing time by node-forge
+            ]
+            if ((typeof args.desc == 'string') || (typeof args.url == 'string')) {
+                var codeSigningAttributes = { 'tagClass': 0, 'type': 16, 'constructed': true, 'composed': true, 'value': [] };
+                if (args.desc != null) { // Encode description as big-endian unicode.
+                    var desc = "", ucs = Buffer.from(args.desc, 'ucs2').toString()
+                    for (var k = 0; k < ucs.length; k += 2) { desc += String.fromCharCode(ucs.charCodeAt(k + 1), ucs.charCodeAt(k)); }
+                    codeSigningAttributes.value.push({ 'tagClass': 128, 'type': 0, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 128, 'type': 0, 'constructed': false, 'composed': false, 'value': desc }] });
+                }
+                if (args.url != null) { codeSigningAttributes.value.push({ 'tagClass': 128, 'type': 1, 'constructed': true, 'composed': true, 'value': [{ 'tagClass': 128, 'type': 0, 'constructed': false, 'composed': false, 'value': args.url }] }); }
+                authenticatedAttributes.push({ type: obj.Oids.SPC_SP_OPUS_INFO_OBJID, value: codeSigningAttributes });
+            }
+
+            // Add the signer and sign
+            p7.addSigner({
+                key: cert.key,
+                certificate: cert.cert,
+                digestAlgorithm: forge.pki.oids.sha384,
+                authenticatedAttributes: authenticatedAttributes
+            });
+            p7.sign();
+            var p7signature = Buffer.from(forge.pkcs7.messageToPem(p7).split('-----BEGIN PKCS7-----')[1].split('-----END PKCS7-----')[0], 'base64');
+            //console.log('Signature', Buffer.from(p7signature, 'binary').toString('base64'));
+
+            // Quad Align the results, adding padding if necessary
+            var len = written + p7signature.length;
+            var padding = (8 - ((len) % 8)) % 8;
+
+            // Write the signature block header and signature
+            var win = Buffer.alloc(8);                              // WIN CERTIFICATE Structure
+            win.writeUInt32LE(p7signature.length + padding + 8);    // DWORD length
+            win.writeUInt16LE(512, 4);                              // WORD revision
+            win.writeUInt16LE(2, 6);                                // WORD type
+            fs.writeSync(output, win);
+            fs.writeSync(output, p7signature);
+            if (padding > 0) { fs.writeSync(output, Buffer.alloc(padding, 0)); }
+
+            // Write the signature header
+            var addresstable = Buffer.alloc(8);
+            addresstable.writeUInt32LE(written);
+            addresstable.writeUInt32LE(8 + p7signature.length + padding, 4);
+            var signatureHeaderLocation = (obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
+            fs.writeSync(output, addresstable, 0, 8, signatureHeaderLocation);
+            written += (p7signature.length + padding + 8);          // Add the signature block to written counter
+
+            // Compute the checksum and write it in the PE header checksum location
+            var tmp = Buffer.alloc(4);
+            tmp.writeUInt32LE(runChecksumOnFile(output, written, ((obj.header.peOptionalHeaderLocation + 64) / 4)));
+            fs.writeSync(output, tmp, 0, 4, obj.header.peOptionalHeaderLocation + 64);
+        }
 
         // Close the file
         fs.closeSync(output);
@@ -1096,6 +1379,16 @@ function start() {
         console.log("");
         console.log("Note that certificate PEM files must first have the signing certificate,");
         console.log("followed by all certificates that form the trust chain.");
+        console.log("");
+        console.log("When doing sign/unsign, you can also change resource properties of the generated file.");
+        console.log("");
+        console.log("          --filedescription [value]");
+        console.log("          --fileversion [value]");
+        console.log("          --internalname [value]");
+        console.log("          --legalcopyright [value]");
+        console.log("          --originalfilename [value]");
+        console.log("          --productname [value]");
+        console.log("          --productversion [value]");
         return;
     }
 
@@ -1115,6 +1408,15 @@ function start() {
         exe = createAuthenticodeHandler(args.exe);
         if (exe == null) { console.log("Unable to parse executable file: " + args.exe); return; }
     }
+
+    // Parse the resources and make any required changes
+    var resChanges = false, versionStrings = exe.getVersionInfo();
+    var versionProperties = ['FileDescription', 'FileVersion', 'InternalName', 'LegalCopyright', 'OriginalFilename', 'ProductName', 'ProductVersion'];
+    for (var i in versionProperties) {
+        const prop = versionProperties[i], propl = prop.toLowerCase();
+        if (args[propl] && (args[propl] != versionStrings[prop])) { versionStrings[prop] = args[propl]; resChanges = true; }
+    }
+    if (resChanges == true) { exe.setVersionInfo(versionStrings); }
 
     // Execute the command
     var command = process.argv[2].toLowerCase();
@@ -1157,14 +1459,32 @@ function start() {
         if (typeof args.hash == 'string') { args.hash = args.hash.toLowerCase(); if (['md5', 'sha224', 'sha256', 'sha384', 'sha512'].indexOf(args.hash) == -1) { console.log("Invalid hash method, must be SHA256 or SHA384"); return; } }
         if (args.hash == null) { args.hash = 'sha384'; }
         createOutFile(args, args.exe);
-        const cert = loadCertificates(args.pem);
-        if (cert == null) { console.log("Unable to load certificate and/or private key, generating test certificate."); }
-        console.log("Signing to " + args.out); exe.sign(cert, args); console.log("Done.");
+        var cert = loadCertificates(args.pem);
+        if (cert == null) { console.log("Unable to load certificate and/or private key, generating test certificate."); cert = createSelfSignedCert({ cn: 'Test' }); }
+        if (resChanges == false) {
+            console.log("Signing to " + args.out);
+            exe.sign(cert, args); // Simple signing, copy most of the original file.
+        } else {
+            console.log("Changing resources and signing to " + args.out);
+            exe.writeExecutable(args, cert); // Signing with resources decoded and re-encoded.
+        }
+        console.log("Done.");
     }
     if (command == 'unsign') { // Unsign an executable
         if (typeof args.exe != 'string') { console.log("Missing --exe [filename]"); return; }
         createOutFile(args, args.exe);
-        if (exe.header.signed) { console.log("Unsigning to " + args.out); exe.unsign(args); console.log("Done."); } else { console.log("Executable is not signed."); }
+        if (resChanges == false) {
+            if (exe.header.signed) {
+                console.log("Unsigning to " + args.out);
+                exe.unsign(args); // Simple unsign,  copy most of the original file.
+                console.log("Done.");
+            } else {
+                console.log("Executable is not signed.");
+            }
+        } else {
+            console.log("Changing resources and unsigning to " + args.out);
+            exe.writeExecutable(args, null); // Unsigning with resources decoded and re-encoded.
+        }
     }
     if (command == 'createcert') { // Create a code signing certificate and private key
         if (typeof args.out != 'string') { console.log("Missing --out [filename]"); return; }
@@ -1213,18 +1533,6 @@ function start() {
         console.log("Writing to " + args.out);
         fs.writeFileSync(args.out, Buffer.concat([buf, icon.icon]));
         console.log("Done.");
-    }
-    if (command == 'test') { // Grow the resource segment by 100k
-        if (exe == null) { console.log("Missing --exe [filename]"); return; }
-        createOutFile(args, args.exe);
-        console.log("Writting to " + args.out);
-        exe.resourcesChanged = true; // Indicate the resources have changed
-        exe.writeExecutable(args);
-
-        // Parse the output file
-        var exe2 = createAuthenticodeHandler(args.out);
-        if (exe2 == null) { console.log("Unable to parse output executable file: " + args.out); return; }
-        console.log('Output executable parsed correctly.');
     }
 
     // Close the file

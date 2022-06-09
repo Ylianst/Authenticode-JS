@@ -20,6 +20,7 @@ Usage:
   node authenticode.js [command] [options]
 Commands:
   info: Show information about an executable.
+          --exe [file]             Required executable to view information.
           --json                   Show information in JSON format.
   sign: Sign an executable.
           --exe [file]             Required executable to sign.
@@ -27,6 +28,7 @@ Commands:
           --pem [pemfile]          Certificate & private key to sign the executable with.
           --desc [description]     Description string to embbed into signature.
           --url [url]              URL to embbed into signature.
+          --hash [method]          Default is SHA384, possible value: MD5, SHA224, SHA256, SHA384 or SHA512.
   unsign: Remove the signature from the executable.
           --exe [file]             Required executable to un-sign.
           --out [file]             Resulting executable with signature removed.
@@ -42,6 +44,16 @@ Commands:
 
 Note that certificate PEM files must first have the signing certificate,
 followed by all certificates that form the trust chain.
+
+When doing sign/unsign, you can also change resource properties of the generated file.
+
+          --filedescription [value]
+          --fileversion [value]
+          --internalname [value]
+          --legalcopyright [value]
+          --originalfilename [value]
+          --productname [value]
+          --productversion [value]
 ```
 
 ## Using as a module
