@@ -1,6 +1,6 @@
 # Authenticode-JS
 
-Authenticode-JS is a fully NodeJS tool that can sign Windows executables. You can also get information about an executable signature, un-sign an executable and generate your own code signing certificate.
+Authenticode-JS is a fully NodeJS tool that can sign and timestamp Windows executables. You can also get information about an executable signature, un-sign an executable and generate your own code signing certificate.
 
 This module can be useful when wanting to sign windows executable on non-windows platforms, like signing a Windows executable on Linux or macOS. This code is used by [MeshCentral](https://meshcentral.com) to code-sign the agent on each installed server.
 
@@ -29,6 +29,7 @@ Commands:
           --desc [description]     Description string to embbed into signature.
           --url [url]              URL to embbed into signature.
           --hash [method]          Default is SHA384, possible value: MD5, SHA224, SHA256, SHA384 or SHA512.
+          --time [url]             The time signing server URL.
   unsign: Remove the signature from the executable.
           --exe [file]             Required executable to un-sign.
           --out [file]             Resulting executable with signature removed.
@@ -41,6 +42,10 @@ Commands:
           --org [value]            Certificate organization name.
           --ou [value]             Certificate organization unit name.
           --serial [value]         Certificate serial number.
+  timestamp: Add a signed timestamp to an already signed executable.
+          --exe [file]             Required executable to sign.
+          --out [file]             Resulting signed executable.
+          --time [url]             The time signing server URL.
 
 Note that certificate PEM files must first have the signing certificate,
 followed by all certificates that form the trust chain.
@@ -80,11 +85,11 @@ You can remove the signature of an executable like this:
 exehandler.unsign({ out: '/tmp/windowsexecutable-unsigned.exe' });
 ```
 
-You can sign or re-sign an exectuable. You can load the certificate PEM file using the built in `loadcertificate()` method, or you can pass null as the certificate and a test certificate will be generated and used to sign the executable. The `desc` and `url` options are optional.
+You can sign or re-sign an exectuable and timestamp it. You can load the certificate PEM file using the built in `loadcertificate()` method, or you can pass null as the certificate and a test certificate will be generated and used to sign the executable. The `desc` and `url` options are optional.
 
 ```
 const cert = require("authenticode").loadCertificates("/tmp/signingcert.pem");
-exehandler.sign(cert, { out: '/tmp/windowsexecutable-signed.exe', desc: "description", url: "https://sample.org" });
+exehandler.sign(cert, { out: '/tmp/windowsexecutable-signed.exe', desc: "description", url: "https://sample.org", time: "http://timestamp.sectigo.com" });
 ```
 
 You can generate your own code signing certificate. All of the certificate creation values are optional, but `cn` should really be present. Oddly, the serial number should be an integer that starts with a single leading `0`, for example `0123` or `01111`. Once created, you can use node-forge to save the certificate.
