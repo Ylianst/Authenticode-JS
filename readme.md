@@ -30,6 +30,7 @@ Commands:
           --url [url]              URL to embbed into signature.
           --hash [method]          Default is SHA384, possible value: MD5, SHA224, SHA256, SHA384 or SHA512.
           --time [url]             The time signing server URL.
+          --proxy [url]            The HTTP proxy to use to contact the time signing server, must start with http://
   unsign: Remove the signature from the executable.
           --exe [file]             Required executable to un-sign.
           --out [file]             Resulting executable with signature removed.
@@ -46,6 +47,7 @@ Commands:
           --exe [file]             Required executable to sign.
           --out [file]             Resulting signed executable.
           --time [url]             The time signing server URL.
+          --proxy [url]            The HTTP proxy to use to contact the time signing server, must start with http://
 
 Note that certificate PEM files must first have the signing certificate,
 followed by all certificates that form the trust chain.
