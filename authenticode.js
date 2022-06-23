@@ -407,116 +407,100 @@ function createAuthenticodeHandler(path) {
         const requestBody = Buffer.from(asn1.toDer(asn1obj).data, 'binary').toString('base64');
 
         // Make an HTTP request
-        const http = require('http');
-        var options = {
-            method: 'POST',
-            headers: {
-                'accept': 'application/octet-stream',
-                'cache-control': 'no-cache',
-                'user-agent': 'Transport',
-                'content-type': 'application/octet-stream',
-                'content-length': Buffer.byteLength(requestBody)
+        const options = { url: args.time, proxy: args.proxy };
+
+        // Make a request to the time server
+        httpRequest(options, requestBody, function (err, data) {
+            if (err != null) { func(err); return; }
+
+            // Decode the timestamp signature block
+            var timepkcs7der = null;
+            try { timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(data, 'base64').toString('binary'))); } catch (ex) { func('' + ex); return; }
+
+            // Decode the executable signature block
+            var pkcs7der = null;
+            try { pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(obj.getRawSignatureBlock(), 'base64').toString('binary'))); } catch (ex) { func('' + ex); return; }
+
+            // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
+            // TODO: We could look to see if the certificate is already present in the executable
+            const timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
+            for (var i in timeasn1Certs) { pkcs7der.value[1].value[0].value[3].value.push(timeasn1Certs[i]); }
+
+            // Remove any existing time stamp signatures
+            var newValues = [];
+            for (var i in pkcs7der.value[1].value[0].value[4].value[0].value) {
+                const j = pkcs7der.value[1].value[0].value[4].value[0].value[i];
+                if ((j.tagClass != 128) || (j.type != 1)) { newValues.push(j); } // If this is not a time stamp, add it to out new list.
             }
-        };
+            pkcs7der.value[1].value[0].value[4].value[0].value = newValues; // Set the new list
 
-        // Set up the request
-        var responseAccumulator = '';
-        var req = http.request(args.time, options, function (res) {
-            res.setEncoding('utf8');
-            res.on('data', function (chunk) { responseAccumulator += chunk; });
-            res.on('end', function () {
-                // Decode the timestamp signature block
-                const timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(responseAccumulator, 'base64').toString('binary')));
+            // Get the time signature and add it to the executables PKCS7
+            const timeasn1Signature = timepkcs7der.value[1].value[0].value[4];
+            const countersignatureOid = asn1.oidToDer('1.2.840.113549.1.9.6').data;
+            const asn1obj2 =
+                asn1.create(asn1.Class.CONTEXT_SPECIFIC, 1, true, [
+                    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+                        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, countersignatureOid),
+                        timeasn1Signature
+                    ])
+                ]);
+            pkcs7der.value[1].value[0].value[4].value[0].value.push(asn1obj2);
 
-                // Decode the executable signature block
-                const pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(obj.getRawSignatureBlock(), 'base64').toString('binary')));
+            // Re-encode the executable signature block
+            const p7signature = Buffer.from(forge.asn1.toDer(pkcs7der).data, 'binary');
 
-                // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
-                // TODO: We could look to see if the certificate is already present in the executable
-                const timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
-                for (var i in timeasn1Certs) { pkcs7der.value[1].value[0].value[3].value.push(timeasn1Certs[i]); }
+            // Open the output file
+            var output = null;
+            try { output = fs.openSync(args.out, 'w+'); } catch (ex) { }
+            if (output == null) return false;
+            var tmp, written = 0;
+            var executableSize = obj.header.sigpos ? obj.header.sigpos : this.filesize;
 
-                // Remove any existing time stamp signatures
-                var newValues = [];
-                for (var i in pkcs7der.value[1].value[0].value[4].value[0].value) {
-                    const j = pkcs7der.value[1].value[0].value[4].value[0].value[i];
-                    if ((j.tagClass != 128) || (j.type != 1)) { newValues.push(j); } // If this is not a time stamp, add it to out new list.
-                }
-                pkcs7der.value[1].value[0].value[4].value[0].value = newValues; // Set the new list
+            // Compute pre-header length and copy that to the new file
+            var preHeaderLen = (obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
+            var tmp = readFileSlice(written, preHeaderLen);
+            fs.writeSync(output, tmp);
+            written += tmp.length;
 
-                // Get the time signature and add it to the executables PKCS7
-                const timeasn1Signature = timepkcs7der.value[1].value[0].value[4];
-                const countersignatureOid = asn1.oidToDer('1.2.840.113549.1.9.6').data;
-                const asn1obj2 =
-                    asn1.create(asn1.Class.CONTEXT_SPECIFIC, 1, true, [
-                        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
-                            asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, countersignatureOid),
-                            timeasn1Signature
-                        ])
-                    ]);
-                pkcs7der.value[1].value[0].value[4].value[0].value.push(asn1obj2);
+            // Quad Align the results, adding padding if necessary
+            var len = executableSize + p7signature.length;
+            var padding = (8 - ((len) % 8)) % 8;
 
-                // Re-encode the executable signature block
-                const p7signature = Buffer.from(forge.asn1.toDer(pkcs7der).data, 'binary');
+            // Write the signature header
+            var addresstable = Buffer.alloc(8);
+            addresstable.writeUInt32LE(executableSize);
+            addresstable.writeUInt32LE(8 + p7signature.length + padding, 4);
+            fs.writeSync(output, addresstable);
+            written += addresstable.length;
 
-                // Open the output file
-                var output = null;
-                try { output = fs.openSync(args.out, 'w+'); } catch (ex) { }
-                if (output == null) return false;
-                var tmp, written = 0;
-                var executableSize = obj.header.sigpos ? obj.header.sigpos : this.filesize;
-
-                // Compute pre-header length and copy that to the new file
-                var preHeaderLen = (obj.header.peHeaderLocation + 152 + (obj.header.pe32plus * 16));
-                var tmp = readFileSlice(written, preHeaderLen);
+            // Copy the rest of the file until the start of the signature block
+            while ((executableSize - written) > 0) {
+                tmp = readFileSlice(written, Math.min(executableSize - written, 65536));
                 fs.writeSync(output, tmp);
                 written += tmp.length;
+            }
 
-                // Quad Align the results, adding padding if necessary
-                var len = executableSize + p7signature.length;
-                var padding = (8 - ((len) % 8)) % 8;
+            // Write the signature block header and signature
+            var win = Buffer.alloc(8);                              // WIN CERTIFICATE Structure
+            win.writeUInt32LE(p7signature.length + padding + 8);    // DWORD length
+            win.writeUInt16LE(512, 4);                              // WORD revision
+            win.writeUInt16LE(2, 6);                                // WORD type
+            fs.writeSync(output, win);
+            fs.writeSync(output, p7signature);
+            if (padding > 0) { fs.writeSync(output, Buffer.alloc(padding, 0)); }
+            written += (p7signature.length + padding + 8);
 
-                // Write the signature header
-                var addresstable = Buffer.alloc(8);
-                addresstable.writeUInt32LE(executableSize);
-                addresstable.writeUInt32LE(8 + p7signature.length + padding, 4);
-                fs.writeSync(output, addresstable);
-                written += addresstable.length;
+            // Compute the checksum and write it in the PE header checksum location
+            var tmp = Buffer.alloc(4);
+            tmp.writeUInt32LE(runChecksumOnFile(output, written, ((obj.header.peOptionalHeaderLocation + 64) / 4)));
+            fs.writeSync(output, tmp, 0, 4, obj.header.peOptionalHeaderLocation + 64);
 
-                // Copy the rest of the file until the start of the signature block
-                while ((executableSize - written) > 0) {
-                    tmp = readFileSlice(written, Math.min(executableSize - written, 65536));
-                    fs.writeSync(output, tmp);
-                    written += tmp.length;
-                }
+            // Close the file
+            fs.closeSync(output);
 
-                // Write the signature block header and signature
-                var win = Buffer.alloc(8);                              // WIN CERTIFICATE Structure
-                win.writeUInt32LE(p7signature.length + padding + 8);    // DWORD length
-                win.writeUInt16LE(512, 4);                              // WORD revision
-                win.writeUInt16LE(2, 6);                                // WORD type
-                fs.writeSync(output, win);
-                fs.writeSync(output, p7signature);
-                if (padding > 0) { fs.writeSync(output, Buffer.alloc(padding, 0)); }
-                written += (p7signature.length + padding + 8);
-
-                // Compute the checksum and write it in the PE header checksum location
-                var tmp = Buffer.alloc(4);
-                tmp.writeUInt32LE(runChecksumOnFile(output, written, ((obj.header.peOptionalHeaderLocation + 64) / 4)));
-                fs.writeSync(output, tmp, 0, 4, obj.header.peOptionalHeaderLocation + 64);
-
-                // Close the file
-                fs.closeSync(output);
-
-                // Indicate we are done
-                func(null);
-            });
+            // Indicate we are done
+            func(null);
         });
-
-        // Post the data
-        req.on('error', function (err) { func('' + err); });
-        req.write(requestBody);
-        req.end();
     }
 
     // Read a resource table.
@@ -1291,7 +1275,8 @@ function createAuthenticodeHandler(path) {
             signEx(args, p7signature, obj.filesize, func);
         } else {
             // Decode the signature block
-            var pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature));
+            var pkcs7der = null;
+            try { pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature)); } catch (ex) { func('' + ex); return; }
 
             // To work around ForgeJS PKCS#7 limitation, this may break PKCS7 verify if ForgeJS adds support for it in the future
             // Switch content type from "1.3.6.1.4.1.311.2.1.4" to "1.2.840.113549.1.7.1"
@@ -1316,65 +1301,150 @@ function createAuthenticodeHandler(path) {
                 ]);
 
             // Re-decode the PKCS7 from the executable, this time, no workaround needed
-            pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature));
+            try { pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature)); } catch (ex) { func('' + ex); return; }
 
             // Serialize an ASN.1 object to DER format in Base64
             const requestBody = Buffer.from(asn1.toDer(asn1obj).data, 'binary').toString('base64');
 
             // Make an HTTP request
-            const http = require('http');
-            var options = {
-                method: 'POST',
-                headers: {
-                    'accept': 'application/octet-stream',
-                    'cache-control': 'no-cache',
-                    'user-agent': 'Transport',
-                    'content-type': 'application/octet-stream',
-                    'content-length': Buffer.byteLength(requestBody)
-                }
+            const options = { url: args.time, proxy: args.proxy };
+
+            // Make a request to the time server
+            httpRequest(options, requestBody, function (err, data) {
+                if (err != null) { func(err); return; }
+
+                // Decode the timestamp signature block
+                var timepkcs7der = null;
+                try { timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(data, 'base64').toString('binary'))); } catch (ex) { func('' + ex); return; }
+
+                // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
+                // TODO: We could look to see if the certificate is already present in the executable
+                const timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
+                for (var i in timeasn1Certs) { pkcs7der.value[1].value[0].value[3].value.push(timeasn1Certs[i]); }
+
+                // Get the time signature and add it to the executables PKCS7
+                const timeasn1Signature = timepkcs7der.value[1].value[0].value[4];
+                const countersignatureOid = asn1.oidToDer('1.2.840.113549.1.9.6').data;
+                const asn1obj2 =
+                    asn1.create(asn1.Class.CONTEXT_SPECIFIC, 1, true, [
+                        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+                            asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, countersignatureOid),
+                            timeasn1Signature
+                        ])
+                    ]);
+                pkcs7der.value[1].value[0].value[4].value[0].value.push(asn1obj2);
+
+                // Re-encode the executable signature block
+                const p7signature = Buffer.from(forge.asn1.toDer(pkcs7der).data, 'binary');
+
+                // Write the file with the signature block
+                signEx(args, p7signature, obj.filesize, func);
+            });
+        }
+    }
+
+    // Make a HTTP request, use a proxy if needed
+    function httpRequest(options, requestBody, func) {
+        // Decode the URL
+        const timeServerUrl = new URL(options.url);
+        options.protocol = timeServerUrl.protocol;
+        options.hostname = timeServerUrl.hostname;
+        options.path = timeServerUrl.pathname;
+        options.port = ((timeServerUrl.port == '') ? 80 : parseInt(timeServerUrl.port));
+
+        if (options.proxy == null) {
+            // No proxy needed
+
+            // Setup the options
+            delete options.url;
+            options.method = 'POST';
+            options.headers = {
+                'accept': 'application/octet-stream',
+                'cache-control': 'no-cache',
+                'user-agent': 'Transport',
+                'content-type': 'application/octet-stream',
+                'content-length': Buffer.byteLength(requestBody)
             };
 
             // Set up the request
             var responseAccumulator = '';
-            var req = http.request(args.time, options, function (res) {
+            var req = require('http').request(options, function (res) {
                 res.setEncoding('utf8');
                 res.on('data', function (chunk) { responseAccumulator += chunk; });
-                res.on('end', function () {
-                    // Decode the timestamp signature block
-                    const timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(responseAccumulator, 'base64').toString('binary')));
-
-                    // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
-                    // TODO: We could look to see if the certificate is already present in the executable
-                    const timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
-                    for (var i in timeasn1Certs) { pkcs7der.value[1].value[0].value[3].value.push(timeasn1Certs[i]); }
-
-                    // Get the time signature and add it to the executables PKCS7
-                    const timeasn1Signature = timepkcs7der.value[1].value[0].value[4];
-                    const countersignatureOid = asn1.oidToDer('1.2.840.113549.1.9.6').data;
-                    const asn1obj2 =
-                        asn1.create(asn1.Class.CONTEXT_SPECIFIC, 1, true, [
-                            asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
-                                asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, countersignatureOid),
-                                timeasn1Signature
-                            ])
-                        ]);
-                    pkcs7der.value[1].value[0].value[4].value[0].value.push(asn1obj2);
-
-                    // Re-encode the executable signature block
-                    const p7signature = Buffer.from(forge.asn1.toDer(pkcs7der).data, 'binary');
-
-                    // Write the file with the signature block
-                    signEx(args, p7signature, obj.filesize, func);
-                });
+                res.on('end', function () { func(null, responseAccumulator); });
             });
 
             // Post the data
             req.on('error', function (err) { func('' + err); });
             req.write(requestBody);
             req.end();
+        } else {
+            // We are using a proxy
+            // This is a fairly basic proxy implementation, should work most of the time.
+
+            // Setup the options and decode the proxy URL
+            var proxyOptions = { method: 'CONNECT' };
+            if (options.proxy) {
+                const proxyUrl = new URL(options.proxy);
+                proxyOptions.protocol = proxyUrl.protocol;
+                proxyOptions.hostname = proxyUrl.hostname;
+                proxyOptions.path = options.hostname + ':' + options.port;
+                proxyOptions.port = ((proxyUrl.port == '') ? 80 : parseInt(proxyUrl.port));
+            }
+
+            // Set up the proxy request
+            var responseAccumulator = '';
+            var req = require('http').request(proxyOptions);
+            req.on('error', function (err) { func('' + err); });
+            req.on('connect', function (res, socket, head) {
+                // Make a request over the HTTP tunnel
+                socket.write('POST ' + options.path + ' HTTP/1.1\r\n' +
+                    'host: ' + options.hostname + ':' + options.port + '\r\n' +
+                    'accept: application/octet-stream\r\n' +
+                    'cache-control: no-cache\r\n' +
+                    'user-agent: Transport\r\n' +
+                    'content-type: application/octet-stream\r\n' +
+                    'content-length: ' + Buffer.byteLength(requestBody) + '\r\n' +
+                    '\r\n' + requestBody);
+                socket.on('data', function (chunk) {
+                    responseAccumulator += chunk.toString();
+                    var responseData = parseHttpResponse(responseAccumulator);
+                    if (responseData != null) { try { socket.end(); } catch (ex) { console.log('ex', ex); } socket.xdone = true; func(null, responseData); }
+                });
+                socket.on('end', function () {
+                    if (socket.xdone == true) return;
+                    var responseData = parseHttpResponse(responseAccumulator);
+                    if (responseData != null) { func(null, responseData); } else { func("Unable to parse response."); }
+                });
+            });
+            req.end();
         }
     }
 
+    // Parse the HTTP response and return data if available
+    function parseHttpResponse(data) {
+        var dataSplit = data.split('\r\n\r\n');
+        if (dataSplit.length < 2) return null;
+
+        // Parse the HTTP header
+        var headerSplit = dataSplit[0].split('\r\n'), headers = {};
+        for (var i in headerSplit) {
+            if (i != 0) {
+                var x = headerSplit[i].indexOf(':');
+                headers[headerSplit[i].substring(0, x).toLowerCase()] = headerSplit[i].substring(x + 2);
+            }
+        }
+
+        // If there is a content-length in the header, keep accumulating data until we have the right length
+        if (headers['content-length'] != null) {
+            const contentLength = parseInt(headers['content-length']);
+            if (dataSplit[1].length < contentLength) return null; // Wait for more data
+            return dataSplit[1];
+        }
+        return dataSplit[1];
+    }
+
+    // Complete the signature of an executable
     function signEx(args, p7signature, filesize, func) {
         // Open the output file
         var output = null;
@@ -1562,7 +1632,7 @@ function createAuthenticodeHandler(path) {
             if (args.hash == 'sha512') { hashOid = forge.pki.oids.sha512; fileHash = obj.getHashOfFile(output, 'sha512', written); }
             if (args.hash == 'sha224') { hashOid = forge.pki.oids.sha224; fileHash = obj.getHashOfFile(output, 'sha224', written); }
             if (args.hash == 'md5') { hashOid = forge.pki.oids.md5; fileHash = obj.getHashOfFile(output, 'md5', written); }
-            if (hashOid == null) return false;
+            if (hashOid == null) { func('Bad hash method OID'); return; }
 
             // Create the signature block
             var xp7 = forge.pkcs7.createSignedData();
@@ -1605,7 +1675,8 @@ function createAuthenticodeHandler(path) {
                 writeExecutableEx(output, p7signature, written, func);
             } else {
                 // Decode the signature block
-                var pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature));
+                var pkcs7der = null;
+                try { pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature)); } catch (ex) { func('' + ex); return; }
 
                 // To work around ForgeJS PKCS#7 limitation, this may break PKCS7 verify if ForgeJS adds support for it in the future
                 // Switch content type from "1.3.6.1.4.1.311.2.1.4" to "1.2.840.113549.1.7.1"
@@ -1630,36 +1701,26 @@ function createAuthenticodeHandler(path) {
                     ]);
 
                 // Re-decode the PKCS7 from the executable, this time, no workaround needed
-                pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature));
+                try { pkcs7der = forge.asn1.fromDer(forge.util.createBuffer(p7signature)); } catch (ex) { func('' + ex); return; }
 
                 // Serialize an ASN.1 object to DER format in Base64
                 const requestBody = Buffer.from(asn1.toDer(asn1obj).data, 'binary').toString('base64');
 
                 // Make an HTTP request
-                const http = require('http');
-                var options = {
-                    method: 'POST',
-                    headers: {
-                        'accept': 'application/octet-stream',
-                        'cache-control': 'no-cache',
-                        'user-agent': 'Transport',
-                        'content-type': 'application/octet-stream',
-                        'content-length': Buffer.byteLength(requestBody)
-                    }
-                };
+                const options = { url: args.time, proxy: args.proxy };
 
-                // Set up the request
-                var responseAccumulator = '';
-                var req = http.request(args.time, options, function (res) {
-                    res.setEncoding('utf8');
-                    res.on('data', function (chunk) { responseAccumulator += chunk; });
-                    res.on('end', function () {
-                        // Decode the timestamp signature block
-                        const timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(responseAccumulator, 'base64').toString('binary')));
+                // Make a request to the time server
+                httpRequest(options, requestBody, function (err, data) {
+                    if (err != null) { func(err); return; }
 
-                        // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
-                        // TODO: We could look to see if the certificate is already present in the executable
-                        const timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
+                    // Decode the timestamp signature block
+                    var timepkcs7der = null;
+                    try { timepkcs7der = forge.asn1.fromDer(forge.util.createBuffer(Buffer.from(data, 'base64').toString('binary'))); } catch (ex) { func('' + ex); return; }
+
+                    // Get the ASN1 certificates used to sign the timestamp and add them to the certs in the PKCS7 of the executable
+                    // TODO: We could look to see if the certificate is already present in the executable
+                    try {
+                        var timeasn1Certs = timepkcs7der.value[1].value[0].value[3].value;
                         for (var i in timeasn1Certs) { pkcs7der.value[1].value[0].value[3].value.push(timeasn1Certs[i]); }
 
                         // Get the time signature and add it to the executables PKCS7
@@ -1679,13 +1740,8 @@ function createAuthenticodeHandler(path) {
 
                         // Write the file with the signature block
                         writeExecutableEx(output, p7signature, written, func);
-                    });
+                    } catch (ex) { func('' + ex); return; } // Something failed
                 });
-
-                // Post the data
-                req.on('error', function (err) { func('' + err); });
-                req.write(requestBody);
-                req.end();
             }
             return;
         }
@@ -1756,6 +1812,7 @@ function start() {
         console.log("          --url [url]              URL to embbed into signature.");
         console.log("          --hash [method]          Default is SHA384, possible value: MD5, SHA224, SHA256, SHA384 or SHA512.");
         console.log("          --time [url]             The time signing server URL.");
+        console.log("          --proxy [url]            The HTTP proxy to use to contact the time signing server, must start with http://");
         console.log("  unsign: Remove the signature from the executable.");
         console.log("          --exe [file]             Required executable to un-sign.");
         console.log("          --out [file]             Resulting executable with signature removed.");
@@ -1772,6 +1829,7 @@ function start() {
         console.log("          --exe [file]             Required executable to sign.");
         console.log("          --out [file]             Resulting signed executable.");
         console.log("          --time [url]             The time signing server URL.");
+        console.log("          --proxy [url]            The HTTP proxy to use to contact the time signing server, must start with http://");
         console.log("");
         console.log("Note that certificate PEM files must first have the signing certificate,");
         console.log("followed by all certificates that form the trust chain.");
