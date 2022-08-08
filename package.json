@@ -1,6 +1,6 @@
 {
   "name": "authenticode-js",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "keywords": [
     "authenticode",
     "code signing"

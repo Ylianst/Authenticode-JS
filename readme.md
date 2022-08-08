@@ -54,6 +54,8 @@ followed by all certificates that form the trust chain.
 
 When doing sign/unsign, you can also change resource properties of the generated file.
 
+          --fileversionnumber n.n.n.n
+          --productversionnumber n.n.n.n
           --filedescription [value]
           --fileversion [value]
           --internalname [value]
