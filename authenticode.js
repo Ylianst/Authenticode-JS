@@ -720,6 +720,38 @@ function createAuthenticodeHandler(path) {
         return pkcs7raw;
     }
 
+    // Hash an object
+    obj.hashObject = function (obj) {
+        const hash = crypto.createHash('sha384');
+        hash.update(JSON.stringify(obj));
+        return hash.digest();
+    }
+
+    // Load a .ico file. This will load all icons in the file into a icon group object
+    obj.loadIcon = function (iconFile) {
+        var iconData = null;
+        try { iconData = fs.readFileSync(iconFile); } catch (ex) {}
+        if ((iconData == null) || (iconData.length < 6) || (iconData[0] != 0) || (iconData[1] != 0)) return null;
+        const r = { resType: iconData.readUInt16LE(2), resCount: iconData.readUInt16LE(4), icons: {} };
+        if (r.resType != 1) return null;
+        var ptr = 6;
+        for (var i = 1; i <= r.resCount; i++) {
+            var icon = {};
+            icon.width = iconData[ptr + 0];
+            icon.height = iconData[ptr + 1];
+            icon.colorCount = iconData[ptr + 2];
+            icon.planes = iconData.readUInt16LE(ptr + 4);
+            icon.bitCount = iconData.readUInt16LE(ptr + 6);
+            icon.bytesInRes = iconData.readUInt32LE(ptr + 8);
+            icon.iconCursorId = i;
+            const offset = iconData.readUInt32LE(ptr + 12);
+            icon.icon = iconData.slice(offset, offset + icon.bytesInRes);
+            r.icons[i] = icon;
+            ptr += 16;
+        }
+        return r;
+    }
+
     // Get icon information from resource
     obj.getIconInfo = function () {
         const r = {}, ptr = obj.header.sections['.rsrc'].rawAddr;
@@ -1947,6 +1979,8 @@ function start() {
         console.log("          --originalfilename [value]");
         console.log("          --productname [value]");
         console.log("          --productversion [value]");
+        console.log("          --removeicongroup [number]");
+        console.log("          --icon [number],[filename.ico]");
         return;
     }
 
@@ -1996,13 +2030,27 @@ function start() {
     var icons = null;
     if (exe != null) {
         icons = exe.getIconInfo();
-        if (typeof args['removeicongroup'] == 'string') {
+        if (typeof args['removeicongroup'] == 'string') { // If --removeicongroup is used, it's to remove an existing icon group
             const groupsToRemove = args['removeicongroup'].split(',');
-            for (var i in groupsToRemove) { delete icons[groupsToRemove[i]]; }
-            resChanges = true;
+            for (var i in groupsToRemove) { if (icons[groupsToRemove[i]] != null) { delete icons[groupsToRemove[i]]; resChanges = true; } }
         } else if (typeof args['removeicongroup'] == 'number') {
-            delete icons[args['removeicongroup']];
-            resChanges = true;
+            if (icons[args['removeicongroup']] != null) { delete icons[args['removeicongroup']]; resChanges = true; }
+        }
+        if (typeof args['icon'] == 'string') { // If --icon is used, it's to add or replace an existing icon group
+            const iconToAddSplit = args['icon'].split(',');
+            if (iconToAddSplit.length != 2) { console.log("The --icon format is: --icon [number],[file]."); return; }
+            const iconName = parseInt(iconToAddSplit[0]);
+            const iconFile = iconToAddSplit[1];
+            const icon = exe.loadIcon(iconFile);
+            if (icon == null) { console.log("Unable to load icon: " + iconFile); return; }
+            if (icons[iconName] != null) {
+                const iconHash = exe.hashObject(icon); // Compute the new icon group hash
+                const iconHash2 = exe.hashObject(icons[iconName]); // Computer the old icon group hash
+                if (iconHash != iconHash2) { icons[iconName] = icon; resChanges = true; } // If different, replace the icon group
+            } else {
+                icons[iconName] = icon; // We are adding an icon group
+                resChanges = true;
+            }
         }
         if (resChanges == true) { exe.setIconInfo(icons); }
     }
@@ -2081,7 +2129,7 @@ function start() {
         if (resChanges == false) {
             if (exe.header.signed) {
                 console.log("Unsigning to " + args.out);
-                exe.unsign(args); // Simple unsign,  copy most of the original file.
+                exe.unsign(args); // Simple unsign, copy most of the original file.
                 console.log("Done.");
             } else {
                 console.log("Executable is not signed.");
