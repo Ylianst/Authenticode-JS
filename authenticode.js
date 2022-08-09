@@ -571,7 +571,7 @@ function createAuthenticodeHandler(path) {
         if ((resSizeTotal % fileAlign) != 0) { resSizeTotal += (fileAlign - (resSizeTotal % fileAlign)); }
         const resSectionBuffer = Buffer.alloc(resSizeTotal);
 
-        // Write the resource section, calling a recusrize method
+        // Write the resource section, calling a recursive method
         const resPointers = { tables: 0, items: resSizes.tables, names: resSizes.tables + resSizes.items, data: resSizes.tables + resSizes.items + resSizes.names };
         createResourceSection(resources, resSectionBuffer, resPointers);
         //console.log('generateResourceSection', resPointers);
@@ -775,6 +775,88 @@ function createAuthenticodeHandler(path) {
         }
 
         return r;
+    }
+
+    // Set icon information
+    obj.setIconInfo = function (iconInfo) {
+        //console.log('before', JSON.stringify(obj.resources.entries, null, 2));
+
+        // Delete all icon and icon groups the the ressources
+        var resourcesEntries = [];
+        for (var i = 0; i < obj.resources.entries.length; i++) {
+            if ((obj.resources.entries[i].name != resourceDefaultNames.icon) && (obj.resources.entries[i].name != resourceDefaultNames.iconGroups)) {
+                resourcesEntries.push(obj.resources.entries[i]);
+            }// else { console.log('remove', JSON.stringify(obj.resources.entries[i].table, null, 2)); }
+        }
+        obj.resources.entries = resourcesEntries;
+
+        //console.log('iconInfo', iconInfo);
+        // count the icon groups
+        var iconGroupCount = 0;
+        for (var i in iconInfo) { iconGroupCount++; }
+        if (iconGroupCount == 0) return; // If there are no icon groups, we are done
+
+        // Add the new icons entry
+        const iconsEntry = { name: resourceDefaultNames.icon, table: { characteristics: 0, timeDateStamp: 0, majorVersion: 0, minorVersion: 0, entries: [] } };
+        for (var i in iconInfo) {
+            for (var j in iconInfo[i].icons) {
+                //console.log('iconInfo[i].icons', iconInfo[i].icons);
+                var name = j;
+                if (parseInt(j) == name) { name = parseInt(j); }
+                const iconItemEntry = { name: name, table: { characteristics: 0, timeDateStamp: 0, majorVersion: 0, minorVersion: 0, entries: [{ name: 1033, item: { buffer: iconInfo[i].icons[j].icon, codePage: 0 } }] } }
+                iconsEntry.table.entries.push(iconItemEntry);
+            }
+        }
+        obj.resources.entries.push(iconsEntry);
+        //console.log('add', JSON.stringify(iconsEntry.table, null, 2));
+
+        // Add the new icon group entry
+        const groupEntry = { name: resourceDefaultNames.iconGroups, table: { characteristics: 0, timeDateStamp: 0, majorVersion: 0, minorVersion: 0, entries: [] } };
+        for (var i in iconInfo) {
+            // Build icon group struct
+            var iconCount = 0, p = 6;
+            for (var j in iconInfo[i].icons) { iconCount++; }
+            const buf = Buffer.alloc(6 + (iconCount * 14));
+            buf.writeUInt16LE(iconInfo[i].resType, 2);
+            buf.writeUInt16LE(iconCount, 4);
+            for (var j in iconInfo[i].icons) {
+                buf[p] = iconInfo[i].icons[j].width;
+                buf[p + 1] = iconInfo[i].icons[j].height;
+                buf[p + 2] = iconInfo[i].icons[j].colorCount;
+                buf.writeUInt16LE(iconInfo[i].icons[j].planes, p + 4);
+                buf.writeUInt16LE(iconInfo[i].icons[j].bitCount, p + 6);
+                buf.writeUInt32LE(iconInfo[i].icons[j].bytesInRes, p + 8);
+                buf.writeUInt16LE(j, p + 12);
+                p += 14;
+            }
+            var name = i;
+            if (parseInt(i) == name) { name = parseInt(i); }
+            const groupItemEntry = { name: name, table: { characteristics: 0, timeDateStamp: 0, majorVersion: 0, minorVersion: 0, entries: [{ name: 1033, item: { buffer: buf, codePage: 0 } }] } }
+            groupEntry.table.entries.push(groupItemEntry);
+        }
+        obj.resources.entries.push(groupEntry);
+        //console.log('add', JSON.stringify(groupEntry.table, null, 2));
+
+        // Sort the resources by name. This is required.
+        function resSort(a, b) {
+            if ((typeof a == 'string') && (typeof b == 'string')) { if (a < b) return -1; if (a > b) return 1; return 0; }
+            if ((typeof a == 'number') && (typeof b == 'number')) { return a - b; }
+            if ((typeof a == 'string') && (typeof b == 'number')) { return -1; }
+            return 1;
+        }
+        const names = [];
+        for (var i = 0; i < obj.resources.entries.length; i++) { names.push(obj.resources.entries[i].name); }
+        names.sort(resSort);
+        var newEntryOrder = [];
+        for (var i in names) {
+            for (var j = 0; j < obj.resources.entries.length; j++) {
+                if (obj.resources.entries[j].name == names[i]) { newEntryOrder.push(obj.resources.entries[j]); }
+            }
+        }
+        obj.resources.entries = newEntryOrder;
+
+        //console.log('after', JSON.stringify(obj.resources.entries, null, 2));
+        //console.log('after', obj.resources.entries);
     }
 
     // Decode the version information from the resource
@@ -1907,6 +1989,22 @@ function start() {
             if (args['productversionnumber'] != versionStrings['~ProductVersion']) { versionStrings['~ProductVersion'] = args['productversionnumber']; resChanges = true; }
         }
         if (resChanges == true) { exe.setVersionInfo(versionStrings); }
+    }
+
+    // Parse the icon changes
+    resChanges = false;
+    var icons = null;
+    if (exe != null) {
+        icons = exe.getIconInfo();
+        if (typeof args['removeicongroup'] == 'string') {
+            const groupsToRemove = args['removeicongroup'].split(',');
+            for (var i in groupsToRemove) { delete icons[groupsToRemove[i]]; }
+            resChanges = true;
+        } else if (typeof args['removeicongroup'] == 'number') {
+            delete icons[args['removeicongroup']];
+            resChanges = true;
+        }
+        if (resChanges == true) { exe.setIconInfo(icons); }
     }
 
     // Execute the command
