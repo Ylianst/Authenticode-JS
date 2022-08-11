@@ -50,6 +50,38 @@ function createOutFile(args, filename) {
     args.out = outputFileName.join('.');
 }
 
+// Hash an object
+function hashObject(obj) {
+    const hash = crypto.createHash('sha384');
+    hash.update(JSON.stringify(obj));
+    return hash.digest().toString('hex');
+}
+
+// Load a .ico file. This will load all icons in the file into a icon group object
+function loadIcon(iconFile) {
+    var iconData = null;
+    try { iconData = fs.readFileSync(iconFile); } catch (ex) { }
+    if ((iconData == null) || (iconData.length < 6) || (iconData[0] != 0) || (iconData[1] != 0)) return null;
+    const r = { resType: iconData.readUInt16LE(2), resCount: iconData.readUInt16LE(4), icons: {} };
+    if (r.resType != 1) return null;
+    var ptr = 6;
+    for (var i = 1; i <= r.resCount; i++) {
+        var icon = {};
+        icon.width = iconData[ptr + 0];
+        icon.height = iconData[ptr + 1];
+        icon.colorCount = iconData[ptr + 2];
+        icon.planes = iconData.readUInt16LE(ptr + 4);
+        icon.bitCount = iconData.readUInt16LE(ptr + 6);
+        icon.bytesInRes = iconData.readUInt32LE(ptr + 8);
+        icon.iconCursorId = i;
+        const offset = iconData.readUInt32LE(ptr + 12);
+        icon.icon = iconData.slice(offset, offset + icon.bytesInRes);
+        r.icons[i] = icon;
+        ptr += 16;
+    }
+    return r;
+}
+
 // Load certificates and private key from PEM files
 function loadCertificates(pemFileNames) {
     var certs = [], keys = [];
@@ -718,38 +750,6 @@ function createAuthenticodeHandler(path) {
         var derlen = forge.asn1.getBerValueLength(forge.util.createBuffer(pkcs7raw.slice(1, 5))) + 4;
         if (derlen != pkcs7raw.length) { pkcs7raw = pkcs7raw.slice(0, derlen); }
         return pkcs7raw;
-    }
-
-    // Hash an object
-    obj.hashObject = function (obj) {
-        const hash = crypto.createHash('sha384');
-        hash.update(JSON.stringify(obj));
-        return hash.digest();
-    }
-
-    // Load a .ico file. This will load all icons in the file into a icon group object
-    obj.loadIcon = function (iconFile) {
-        var iconData = null;
-        try { iconData = fs.readFileSync(iconFile); } catch (ex) {}
-        if ((iconData == null) || (iconData.length < 6) || (iconData[0] != 0) || (iconData[1] != 0)) return null;
-        const r = { resType: iconData.readUInt16LE(2), resCount: iconData.readUInt16LE(4), icons: {} };
-        if (r.resType != 1) return null;
-        var ptr = 6;
-        for (var i = 1; i <= r.resCount; i++) {
-            var icon = {};
-            icon.width = iconData[ptr + 0];
-            icon.height = iconData[ptr + 1];
-            icon.colorCount = iconData[ptr + 2];
-            icon.planes = iconData.readUInt16LE(ptr + 4);
-            icon.bitCount = iconData.readUInt16LE(ptr + 6);
-            icon.bytesInRes = iconData.readUInt32LE(ptr + 8);
-            icon.iconCursorId = i;
-            const offset = iconData.readUInt32LE(ptr + 12);
-            icon.icon = iconData.slice(offset, offset + icon.bytesInRes);
-            r.icons[i] = icon;
-            ptr += 16;
-        }
-        return r;
     }
 
     // Get icon information from resource
@@ -1661,16 +1661,34 @@ function createAuthenticodeHandler(path) {
         var fullHeaderLen = obj.header.SectionHeadersPtr + (obj.header.coff.numberOfSections * 40);
         var fullHeader = readFileSlice(written, fullHeaderLen);
 
+        // Create the resource section and pad to next 512 byte boundry
+        var rsrcSection = generateResourceSection(obj.resources);
+        var rsrcSectionVirtualSize = rsrcSection.length;
+        var x = (rsrcSection.length % 512);
+        if (x != 0) { rsrcSection = Buffer.concat([rsrcSection, Buffer.alloc(512 - x)]); }
+        var rsrcSectionRawSize = rsrcSection.length;
+
         // Calculate the location and original and new size of the resource segment
         var fileAlign = obj.header.peWindows.fileAlignment
         var resPtr = obj.header.sections['.rsrc'].rawAddr;
         var oldResSize = obj.header.sections['.rsrc'].rawSize;
-        var newResSize = obj.header.sections['.rsrc'].rawSize; // Testing 102400
+        var newResSize = rsrcSection.length;
         var resDeltaSize = newResSize - oldResSize;
 
+        // Compute the sizeOfInitializedData
+        var sizeOfInitializedData = 0;
+        for (var i in obj.header.sections) {
+            if (i != '.text') {
+                if (i == '.rsrc') {
+                    sizeOfInitializedData += rsrcSectionRawSize;
+                } else {
+                    sizeOfInitializedData += obj.header.sections[i].rawSize;
+                }
+            }
+        }
+
         // Change PE optional header sizeOfInitializedData standard field
-        fullHeader.writeUInt32LE(obj.header.peStandard.sizeOfInitializedData + resDeltaSize, obj.header.peOptionalHeaderLocation + 8);
-        fullHeader.writeUInt32LE(obj.header.peWindows.sizeOfImage, obj.header.peOptionalHeaderLocation + 56); // TODO: resDeltaSize
+        fullHeader.writeUInt32LE(sizeOfInitializedData, obj.header.peOptionalHeaderLocation + 8);
 
         // Update the checksum to zero
         fullHeader.writeUInt32LE(0, obj.header.peOptionalHeaderLocation + 64);
@@ -1694,18 +1712,33 @@ function createAuthenticodeHandler(path) {
         if (obj.header.dataDirectories.clrRuntimeHeader.addr > resPtr) { fullHeader.writeUInt32LE(obj.header.dataDirectories.clrRuntimeHeader.addr + resDeltaSize, obj.header.peOptionalHeaderLocation + 208 + pePlusOffset); }
 
         // Make changes to the segments table
+        var virtualAddress = 4096;
         for (var i in obj.header.sections) {
             const section = obj.header.sections[i];
             if (i == '.rsrc') {
                 // Change the size of the resource section
-                fullHeader.writeUInt32LE(section.rawSize + resDeltaSize, section.ptr + 8); // virtualSize (TODO)
-                fullHeader.writeUInt32LE(section.rawSize + resDeltaSize, section.ptr + 16); // rawSize
+                fullHeader.writeUInt32LE(rsrcSectionVirtualSize, section.ptr + 8); // virtualSize
+                fullHeader.writeUInt32LE(rsrcSectionRawSize, section.ptr + 16); // rawSize
+
+                // Set the virtual address of the section
+                fullHeader.writeUInt32LE(virtualAddress, section.ptr + 12); // Virtual address
+                var virtualAddressPadding = (rsrcSectionVirtualSize % 4096);
+                virtualAddress += rsrcSectionVirtualSize;
+                if (virtualAddressPadding != 0) { virtualAddress += (4096 - virtualAddressPadding); }
             } else {
                 // Change the location of any other section if located after the resource section
-                if (section.virtualAddr > resPtr) { fullHeader.writeUInt32LE(section.virtualAddr + resDeltaSize, section.ptr + 12); }
                 if (section.rawAddr > resPtr) { fullHeader.writeUInt32LE(section.rawAddr + resDeltaSize, section.ptr + 20); }
+
+                // Set the virtual address of the section
+                fullHeader.writeUInt32LE(virtualAddress, section.ptr + 12); // Virtual address
+                var virtualAddressPadding = (section.virtualSize % 4096);
+                virtualAddress += section.virtualSize;
+                if (virtualAddressPadding != 0) { virtualAddress += (4096 - virtualAddressPadding); }
             }
         }
+
+        // Write size of image. We put the next virtual address.
+        fullHeader.writeUInt32LE(virtualAddress, obj.header.peOptionalHeaderLocation + 56); // sizeOfImage
 
         // Write the entire header to the destination file
         //console.log('Write header', fullHeader.length, written);
@@ -1722,7 +1755,6 @@ function createAuthenticodeHandler(path) {
         }
 
         // Write the new resource section
-        var rsrcSection = generateResourceSection(obj.resources);
         fs.writeSync(output, rsrcSection);
         written += rsrcSection.length;
         //console.log('Write res', rsrcSection.length, written);
@@ -1985,7 +2017,7 @@ function start() {
     }
 
     // Check that a valid command is passed in
-    if (['info', 'sign', 'unsign', 'createcert', 'icons', 'saveicon', 'saveicons', 'header', 'timestamp', 'signblock'].indexOf(process.argv[2].toLowerCase()) == -1) {
+    if (['info', 'sign', 'unsign', 'createcert', 'icons', 'saveicon', 'saveicons', 'header', 'sections', 'timestamp', 'signblock'].indexOf(process.argv[2].toLowerCase()) == -1) {
         console.log("Invalid command: " + process.argv[2]);
         console.log("Valid commands are: info, sign, unsign, createcert, timestamp");
         return;
@@ -2041,12 +2073,12 @@ function start() {
             if (iconToAddSplit.length != 2) { console.log("The --icon format is: --icon [number],[file]."); return; }
             const iconName = parseInt(iconToAddSplit[0]);
             const iconFile = iconToAddSplit[1];
-            const icon = exe.loadIcon(iconFile);
+            const icon = loadIcon(iconFile);
             if (icon == null) { console.log("Unable to load icon: " + iconFile); return; }
             if (icons[iconName] != null) {
-                const iconHash = exe.hashObject(icon); // Compute the new icon group hash
-                const iconHash2 = exe.hashObject(icons[iconName]); // Computer the old icon group hash
-                if (iconHash.toString('hex') != iconHash2.toString('hex')) { icons[iconName] = icon; resChanges = true; } // If different, replace the icon group
+                const iconHash = hashObject(icon); // Compute the new icon group hash
+                const iconHash2 = hashObject(icons[iconName]); // Computer the old icon group hash
+                if (iconHash != iconHash2) { icons[iconName] = icon; resChanges = true; } // If different, replace the icon group
             } else {
                 icons[iconName] = icon; // We are adding an icon group
                 resChanges = true;
@@ -2099,6 +2131,26 @@ function start() {
     if (command == 'header') { // Display the full executable header in JSON format
         if (exe == null) { console.log("Missing --exe [filename]"); return; }
         console.log(exe.header);
+        // Check that the header is valid
+        var ptr = 1024, sizeOfCode = 0, sizeOfInitializedData = 0;
+        for (var i in exe.header.sections) {
+            if (i == '.text') { sizeOfCode += exe.header.sections[i].rawSize; } else { sizeOfInitializedData += exe.header.sections[i].rawSize; }
+            if (exe.header.sections[i].rawAddr != ptr) { console.log('WARNING: ' + i + ' section should have a rawAddr or ' + ptr + ', but has ' + exe.header.sections[i].rawAddr + ' instead.'); }
+            ptr += exe.header.sections[i].rawSize;
+        }
+        if (exe.header.peStandard.sizeOfCode != sizeOfCode) { console.log('WARNING: Size of code is ' + exe.header.peStandard.sizeOfCode + ', should be ' + sizeOfCode + '.'); }
+        if (exe.header.peStandard.sizeOfInitializedData != sizeOfInitializedData) { console.log('WARNING: Size of initialized data is ' + exe.header.peStandard.sizeOfInitializedData + ', should be ' + sizeOfInitializedData + '.'); }
+    }
+    if (command == 'sections') { // Display sections in CSV format
+        if (exe == null) { console.log("Missing --exe [filename]"); return; }
+        var csvHeader = 'section';
+        for (var i in exe.header.sections['.text']) { csvHeader += ',' + i; }
+        console.log(csvHeader);
+        for (var i in exe.header.sections) {
+            var csvData = i;
+            for (var j in exe.header.sections[i]) { csvData += ',' + exe.header.sections[i][j]; }
+            console.log(csvData);
+        }
     }
     if (command == 'sign') { // Sign an executable
         if (typeof args.exe != 'string') { console.log("Missing --exe [filename]"); return; }
@@ -2261,4 +2313,5 @@ if (require.main === module) { start(); }
 // Exports
 module.exports.createAuthenticodeHandler = createAuthenticodeHandler;
 module.exports.loadCertificates = loadCertificates;
-
+module.exports.loadIcon = loadIcon;
+module.exports.hashObject = hashObject;
